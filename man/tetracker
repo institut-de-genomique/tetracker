@@ -54,7 +54,7 @@ Annotates and performs donor scoring.
 
 .TP
 .BI "run " [config_file]
-The coverage value above which the region is considered "high-covered" and ignored from analysis. Defaults to 20000.
+[NOT IMPLEMENTED] Run eris, leto and metis in one run using a configuration file. Not available at this stage.
 
 .TP
 .BI man

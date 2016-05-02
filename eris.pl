@@ -8,6 +8,14 @@ use POSIX qw(floor);
 use Switch;
 use List::Util qw[min max];
 use Devel::Peek;
+use FindBin '$Bin';
+use Config::Simple;
+
+$|=0;
+my %config;
+Config::Simple->import_from("$Bin/TE-Tracker.conf", \%config) or die ("\nERROR:\tImpossible to read main configuration file $Bin/TE-Tracker.conf. Please reinstall TE-Tracker. \n\tError message was: \"",Config::Simple->error(),"\"\n");
+
+my $BASEDIR=$config{"GLOBAL.basedir"};
 my $VERSION=0.1;
 my $PICARD_PATH="/env/cns/src/picard/picard-tools-1.67";
 # PARAMETERS
@@ -93,6 +101,7 @@ print("Sorted input :\t$NOSORT\n") if $NOSORT ne "";
 print("Output dir:\t$OUTPUT_DIR\n");
 print("Using rundata:\t$RUNDATA\n");
 print("Level-1 intrachromosomal filter:\t$FILTER\n");
+print("Read size:\t$READ_SIZE bp\n");
 print("\n");
 
 
@@ -487,7 +496,7 @@ sub bam2discordant_pairs {
     close($disc_HANDLE) if $DISCORDANT ne "no";
     close($conc_HANDLE) if $CONCORDANT ne "no";
     close (IN);
-    print_discordant_pairs ( \%CURRENT_DISCORDANT_PAIRS , $output_dir ) if ($NODISCORDANT eq "");
+    print_discordant_pairs (\%CURRENT_DISCORDANT_PAIRS , $output_dir ) if ($NODISCORDANT eq "");
     print "INFO:\tDone.\n";
 }
 
@@ -903,11 +912,11 @@ sub print_discordant_pairs{
 	my $B = 1;
 	my $different_chr = $case;
 	$different_chr =~/[Cc]hr(\w+)\.[\-\+]\.[Cc]hr(\w+)\.[\-\+]\..+/;
-	print $different_chr;
+	#print $different_chr;
 	my $chr1 = $1;
 	my $chr2 = $2; 
 	my @discordant_pairs = sort { $a->[0] <=> $b->[0] } @{$pair->{$case}};
-	print "chr1 $chr1 chr2 $chr2\n";
+	#print "chr1 $chr1 chr2 $chr2\n";
 	if ( $chr1 ne $chr2 ){
 	    if ( $chr1 =~/\d/ && $chr2=~/\d/ && $chr1 > $chr2 ){
 		$A = 1;
@@ -959,10 +968,11 @@ sub treat_bam{
     my %reads;
     my $first="";
     open ( IN, "$SAMTOOLS_PATH view -h $input |" ) || die "Cannot open $input, $!\n";
+    my $ct_reads=0;
     while ( <IN> ){
 	chomp;
 	if ($_ =~ m/^\@/ ) {
-	    print OUT $_, "\n";
+	    print (OUT $_, "\n");
 	    next;
 	}
 	my $data=$_;
@@ -973,8 +983,9 @@ sub treat_bam{
 		#Sometimes in case of discordant reads the main mapping is quite bad (rescued mate)
 		#In this case the secondary mappings contain worthy information
 		if($first ne "" && (split('\t', $first))[0] eq $tab[0]){
-		    print OUT (split('\n', $first))[0], "\n";
-		    print OUT (split('\n', $data))[0], "\n";
+			$ct_reads++;
+		    print (OUT (split('\n', $first))[0], "\n");
+		    print (OUT (split('\n', $data))[0], "\n");
 		    $first="";
 		}else{
 		    $first=$data;
@@ -984,16 +995,19 @@ sub treat_bam{
 	}
 	elsif ($tab[5] eq $m && $data =~ m/XM:i:[$regx]/ ) {
 	    if($first ne "" && (split('\t', $first))[0] eq $tab[0]){
-		print OUT (split('\n', $first))[0], "\n";
-		print OUT (split('\n', $data))[0], "\n";
+	    	$ct_reads++;
+		print( OUT (split('\n', $first))[0], "\n");
+		print(OUT (split('\n', $data))[0], "\n");
 		$first="";
 	    }else{
 		$first=$data;
 	    }
 	}
     }
+    print("\n\n---------- /!\\ -----------\nWARNING:\t No reads remaining after filtering. Are you sure you specified the right read length?\n---------- /!\\ -----------\n\n") if($ct_reads==0);
     close(IN);
     close(OUT);
+    print STDERR "Done.\n";
 #    `java -jar $PICARD/SamFormatConverter.jar INPUT=$OUTPUT_DIR/perfectmatches.sam OUTPUT=$newfilename 1>&- 2>&`;
 #    `rm $OUTPUT_DIR/perfectmatches.sam`;
 }
@@ -1028,9 +1042,7 @@ sub usage{
 }
 
 sub man{
-    my $BASEDIR=`pwd`;
-    chomp $BASEDIR;
-    system("man $BASEDIR/man/erisman 2>/dev/null");
+    system("man $BASEDIR/man/eris 2>/dev/null");
     die("ERROR:\t Impossible to find MAN file in $BASEDIR/man. Please reinstall TE-Tracker.\n") if (($? >>8) !=0);
 
 }
