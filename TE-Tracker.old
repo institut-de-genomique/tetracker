@@ -1,0 +1,56 @@
+# SVfinder Configuration file
+
+# The [GLOBAL] section sets global parameters that are relevant to the entire pipeline.
+#
+# basedir		is the install directory where the SVfinder binaries are stored
+#
+# rms_command		is the command that is used to submit a job through your local
+#  	       		RMS system. Ask your system administrator or leave blank if unsure.
+#
+# rms_args		is the default parameters to be passed to the rms_command. Leave
+#  	       		blank if unsure.
+#
+# highmem_launch	is the command that will replace rms_command [rms_args] when executing
+# 			memory-intensive tasks. Please refer to the man page for information
+#			about how much memory SVfinder uses. If left blank, rms_command [rms_args]
+#			will be used.
+#
+# highmem_thresh	is the size threshold, in kB, for the cluster files. Above this size limit
+# 			the clustering will be considered memory-intensive and highmem_launch will
+#			be run. The default value of 20 corresponds to an approximate 6Go peak
+#			memory usage.
+
+[GLOBAL]
+basedir		=	/env/cns/proj/projet_AKL/code/trunk
+rms_command	=	bsub
+rms_args	=	
+highmem_launch	=	ssh etna4 
+highmem_thresh	=	20
+#samtools_path	=	/env/cns/src/samtools/samtools-0.1.8/bin/samtools
+samtools_path	=	samtools
+picard_path	=	/env/cns/src/picard/picard-tools-1.67
+java_params	=	
+# The three processing steps specify the default behaviour of each of the steps in the SVfinder pipeline.
+# Changes in the following sections will impact only the corresponding step, and you will still be able to
+# override these parameters with your main SVfinder call.
+#
+# binary    	       is the name of the binary or script file that will be run when the corresponding
+# 		       step is called. Although you can change this parameter to replace pipeline elements
+#		       with your own scripts, it is advised to proceed with caution and ensure compatibility
+#		       between the different steps.
+#
+# default_params	default parameters when calling each step.
+
+[PREPROCESSING]
+binary		=	eris.pl
+default_params	=	-clustering_parameters 500:2000 -nodiscordant -treat_bam=input:0-1 -chainload=treated -maxmap 10000
+
+[CLUSTERING]
+binary		=	leto.pl
+default_params	=	-clustering_parameters 500:2000 -minreads 5
+slc_path	=	/env/cns/proj/projet_AKL/slc/slclust
+
+[POSTPROCESSING]
+binary		=	metis.pl
+default_params	=	-score_donors -annotate
+bedtools_path	=	/env/cns/src/BEDTools/BEDTools-Version-2.16.2/bin

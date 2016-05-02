@@ -1,0 +1,67 @@
+#!/usr/bin/perl -w
+use Config::Simple;
+use Switch;
+use FindBin '$Bin';
+
+$|=0;
+my %config;
+Config::Simple->import_from("$Bin/TE-Tracker.conf", \%config) or die ("\nERROR:\tImpossible to read main configuration file $Bin/TE-Tracker.conf. Please reinstall TE-Tracker. \n\tError message was: \"",Config::Simple->error(),"\"\n");
+
+my $BASEDIR=$config{"GLOBAL.basedir"};
+my $SAM_PATH=$config{"GLOBAL.samtools_path"};
+my $PIC_PATH=$config{"GLOBAL.picard_path"};
+my $BED_PATH=$config{"POSTPROCESSING.bedtools_path"};
+my $SLC=$config{"CLUSTERING.slc_path"};
+my $HT=$config{"GLOBAL.highmem_thresh"};
+my $HC=$config{"GLOBAL.highmem_launch"};
+
+my $MAINOP=lc($ARGV[0]);
+switch ($MAINOP){
+    case "eris"  {eris()}
+    case "leto"  {leto()}
+    case "metis" {metis()}
+    case "run"   {}
+    case "man"   {man();}
+    else {usage();}
+}
+
+sub usage{
+    print STDERR "\nERROR:\tWrong command: \t\"$MAINOP\"\n\n";
+    print STDERR "Usage :\t tetracker [eris|leto|metis|run|man] [OPTIONS...]\n\n";
+    print STDERR "\tCommand summary:\n\t===============\n\n\teris\t\t\t Runs the preprocessing and discordant read detection module with options [OPTIONS...]. \n";
+    print STDERR "\tleto  [OPTIONS...]\t Runs the clustering and calling module with options [OPTIONS...]. \n";
+    print STDERR "\tmetis [OPTIONS...]\t Runs the annotation and scoring module with options [OPTIONS...]. \n";
+    print STDERR "\trun [config_file]\t Runs the three programs sequentially with options specified in config_file. \n";
+    print STDERR "\tman\t\t\t Detailed manual. \n\n";
+
+
+}
+
+sub eris{
+    my $args=join(" ", @ARGV[1..$#ARGV]);
+    system("$BASEDIR/eris.pl $args -samtools=$SAM_PATH -picard_path=$PIC_PATH");
+}
+
+sub leto{
+    my $args=join(" ", @ARGV[1..$#ARGV]);
+    if($HT ne ""){$HT="-highmem_lim=$HT";}
+    if($HC ne ""){$HC="-highmem_cmd=$HC";}
+    system("$BASEDIR/leto.pl -samtools=$SAM_PATH -slc=$SLC $HT \"$HC\" $args");
+
+}
+
+sub metis{
+    my $args=join(" ", @ARGV[1..$#ARGV]);
+    system("$BASEDIR/metis.pl -samtools=$SAM_PATH -bedtools_path=$BED_PATH $args");
+
+}
+
+sub run{
+# The run function reads a configuration file and pipelines everything it finds in it.
+}
+
+sub man{
+    system("man $BASEDIR/man/tetracker 2>/dev/null");
+    die("ERROR:\t Impossible to find MAN file in $BASEDIR/man. Please reinstall TE-Tracker.\n") if (($? >>8) !=0);
+
+}

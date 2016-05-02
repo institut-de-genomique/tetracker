@@ -1,0 +1,170 @@
+.\" Manpage for SVFINDER.
+.TH man 7 "04 sept. 2012" "1.0" "TE-Tracker - eris.pl"
+.SH NAME
+TE-Tracker Eris Module\- detects discordant read pairs in a BAM file
+.SH SYNOPSIS
+eris.pl
+.B -bam
+.I filename
+.B -out
+.I OUTPUT_DIR
+.I [OPTIONS]
+.SH DESCRIPTION
+.BR
+.TP 50
+"So, after all, there was not one Eris alone, but all over the earth there were two. As for one of them, a man would praise her when he came to understand her."
+ 
+Hesiod, Works and Days, 11-24
+
+.P
+The Eris module constitutes the first step in the TE-Tracker pipeline. As such, it is the default value of the 
+.B
+binary
+entry in the 
+.B 
+[PREPROCESSING]
+section of the configuration file.
+ It is able to perform a number of preprocessing steps on the BAM file, as well as detecting pairs with anomalous read orientation and insert size. The preprocessing routines act as filters, that prune out reads not in accordance with the user's restrictions. For example, the user may want to discard reads that have too many mapping errors, or those who have too many mapping possibilities altogether. The program was named after Eris, greek goddess of discord.
+.P 
+This program should be located in the 
+.I
+basedir
+directory as specified in TE-Tracker.conf.
+.SH FEATURES
+The basic working of this program is as follows: it will first analyze a certain sample from the specified BAM file, in order to compute the inherent insert size distribution and coverage parameters. During this step, it will sort your file according to name, using SAMtools. If you have already done this separately, you can use the 
+.B
+-nosort
+parameter. 
+.P
+Then, you can either move on to perform pre-processing steps on your BAM file, or directly continue to the discordant read detection. Note that the program can only perform either of these two operations, so the program will terminate after pre-processing. Hence, it is advised to use the 
+.B -chainload
+option (see below) in order to automatically restart the program and detect discordant reads. This means that you can use 
+.B eris.pl
+independently of the TE-Tracker pipeline to generate discordant BAM files. 
+.SH CONFIGURATION FILE
+All options except 
+.B -bam
+and
+.B -out 
+are discretionary. If they are not specified at runtime, TE-Tracker will look for the TE-Tracker.conf configuration file in the binary directory and will fetch the parameter values from the
+.B [PREPROCESSING]
+section.
+
+
+
+.SH OPTIONS
+There are three types of arguments that can be transmitted to TE-Tracker. The first type is for arguments that can also be specified inside the configuration file under the GLOBAL section. We advise you do not use command-line for those. The second type is for arguments that cannot be specified inside the configuration file, such as 
+.B -bam
+, 
+.B -in
+or
+.BR -out .
+The third type is for arguments that are directly transmitted to each of the three programs, such as
+.BR -clustering_parameters . 
+We recommend to use the command-line only when testing for the best parameters, then once the choice is made, to input them in the configuration file. 
+
+.SS Mandatory options
+.TP 20
+.BI "-bam " "filename"
+Specifies the input BAM. This file should be coordinate-sorted (use 
+.B samtools sort 
+or 
+.B picard SortSam
+). The TE-Tracker program will need a name-sorted file during its execution, if you already have one such file, you can specify it in order to avoid sorting it again using option
+.BR -nosort .
+See also option 
+.BR -in .
+.
+.TP
+.BI "-out " "OUTPUT_DIR"
+Specifies the out	put directory. TE-Tracker expects nothing there. If you have run TE-Tracker before, with identical input and parameters, you may copy the
+.B rundata.dat
+file there in order to avoid analysing the BAM again.
+
+
+
+.SS Discretionary options
+The options in this section are listed in order of execution. Since they allow the user to alter the execution sequence, it is advised to read about them in this order to make sure that their behavior is fully understood.
+.TP 20
+.BI -read " i"
+Default read size. Currently, TE-Tracker does not support variable read lengths and reads should be trimmed to the value specified in this option. Defaults to 76.
+.TP 
+.BI -lib "=[MP|PE]"
+.BR "MP " "is for mate-paired libraries, "
+.BR "PE " "is for paired-end. Defaults to MP."
+.TP
+.BI -maxcov " i"
+Above this coverage, the region will be considered high-covered and ignored from analysis. Defaults to 1000.
+.TP
+.B "-mock "
+Tells the program to stop after analyzing the BAM insert size and coverage distributions. This will generate a 
+.BR "rundata.dat " "file that can be reused by further steps of TE-Tracker."
+.TP
+.BI -rundata " filename"
+Tells the program not to compute the insert size and coverage distributions, and use a previous 
+.BR rundata.dat " file instead."
+.TP 
+.B "-nodiscordant "
+Specifies that the program should not generate discordant information files. These files are used by the following steps of TE-Tracker, you should not use this option unless you also use
+.B -chainload
+or you only want to build a discordant bam file.
+.TP
+.B "-chainload "
+Tells the program to perform a run with all arguments, then rerun on the output without arguments. This is useful for performing pre-treatments on your BAM file. You will usually run those with the
+.B "-nodiscordant "
+option, and this will output a series of treated BAM files. Without the
+.B "-chainload "
+, you would then have to rerun TE-Tracker on these BAM files. Using this option will chainload execution to a new instance of TE-Tracker so that discordant read detection can take place.
+.TP
+.BI -maxmap " i"
+Tells the program to allow at most i mappings when considering reads for concordance/discordance. This is helpful when one does not want to consider reads mapping in highly repeated regions.
+.TP
+.BI -concordant [=sorted]
+Tells the program to generate a BAM file containing the concordant reads in 
+.BR -bam ". The optional "
+.IR sorted " value tells the program to sort the result in chromosomical order. The unsorted file will be kept."
+.TP
+.BI -discordant [=sorted]
+Tells the program to generate a BAM file containing the discordant reads in 
+.BR -bam ", according to the insert size parameters. The optional "
+.IR sorted " value tells the program to sort the result in chromosomical order. The unsorted file will be kept."
+.TP
+.BI -treat_bam [=treat_sequence]
+Tells the program to keep only reads that have a certain number of mismatches.
+.TP 40
+.I " " 
+.IR "treat_sequence" " should be of the form "
+.BR [input|concordant|discordant:i[-j]] ". The first part of this expression defines which file the filter should be applied upon. 
+.BR input " is always available, whereas "
+.BR discordant " and "
+.BR concordant " require the corresponding options to be enabled."
+The second part is a regular expression-type character range. In practical terms, it should be either 
+.BR 0 " or "
+.BR "0-n" " where n is the maximum number of mismatches allowed."
+.TP 20
+.BI "-nosort" " filename"
+Currently all steps of Eris require a read-sorted BAM file at some point in their execution. This options lets you specify a path for it in case one already exists. If this option is not set, sorting will occur using SamTools, which can be a lenghty process.
+.TP
+.BI -f1 " i"
+Level-1 intrachromosomal filter. This option is set to 10000 by default. In case of numerous mappings on the same chromosome for one mate in a pair, the program will pick the first one it encounters that defines an insert size smaller than this parameter. Most users should leave this unchanged. If your genome is masked for repeats, the value
+.BR disabled " can be used to remove this filter altogether."
+.TP
+.B -noluther
+TE-Tracker considers a pair concordant if it has at least one concordant mapping. However this concordant arrangement can be buried deep within the alternative mappings, especially if not using BWA-SW for the alignment. By default, TE-Tracker will reform those pairs, writing the concordant arrangement as the primary mapping in the SAM/BAM line. If you do not want this to happen, use this option, and TE-Tracker will leave the discordant SAM lines untouched.
+.SS Internal parameters
+They directly command parameters in the TE-Tracker algorithm and can be ignored for most purposes.
+.TP 20
+.BI -sample " i"
+The number of reads to take into account when inferring the insert size/coverage distribution. Defaults to one million.
+.TP
+.BI -sm " i"
+The number of median absolute deviations to take into account when computing marginal insert size distribution. Defaults to 4. 
+.TP
+.BI -dm " i"
+Same for coverage distribution.
+.TP
+.BI -ext " i"
+Overlap extension parameter. If two or more mappings of the same read occur within this range, one will be selected randomly. Defaults to 20Kb.
+.TP
+.BI -covext " i"
+Coverage overlap extension. High-coverage analysis will try to build overcovered regions by extending from single positions. This is how far it will reach to find another one. Defaults to 500.

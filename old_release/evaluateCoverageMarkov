@@ -1,0 +1,1711 @@
+#!/usr/bin/perl -w
+# svfinder
+# MA Madoui & JM Aury, Genoscope, 2011
+
+use strict;
+use Getopt::Long;
+use POSIX qw(floor);
+use List::Util qw[min max];
+#use diagnostics;
+
+# PARAMETERS
+our @RERUNS;
+our ( $BAM , $OUTPUT_DIR , $LIB , $EXT , $MAX_COV , $COV_EXTENSION , $READ_SIZE , $SAMTOOLS_PATH , $DOC_MAD , $SPAN_MAD , $SAMPLE_SIZE , $SLC , $MIN_READS, $REFERENCE, $NOSORT, $NOLUTHER, $MINCOV, $CLSTPRM, $MODE, $ANNOTATE, $PICARD, $TRIAL) = ( "", "" , "MP" , 20000 , 1000, 500, 76, "/env/cns/src/samtools/samtools-0.1.8/bin/samtools" , 4 , 4 , 1000000 , "/env/cns/proj/projet_AKL/slc/slclust", 10, "", "", "", 255, "", 3, "", "~agilly/picard-tools-1.65", "");
+my $result = GetOptions ( 	'bam=s'		=>\$BAM,
+				'out=s'		=>\$OUTPUT_DIR,
+				'lib=s'		=>\$LIB,
+				'ext=i'		=>\$EXT,
+				'maxcov=i'	=>\$MAX_COV,
+				'covext=i'	=>\$COV_EXTENSION,
+				'read=i'	=>\$READ_SIZE,
+				'samtools=s'	=>\$SAMTOOLS_PATH,
+				'dm=f'		=>\$DOC_MAD,
+				'sm=f'		=>\$SPAN_MAD,
+				'sample=i'	=>\$SAMPLE_SIZE,
+				'slc=s'		=>\$SLC,
+				'minreads=i'	=>\$MIN_READS,
+				'reference=s'   =>\$REFERENCE,
+				'nosort=s'        =>\$NOSORT,
+				"noluther"      =>\$NOLUTHER,
+				'm=i'           =>\$MINCOV,
+				'clustering_parameters=s' =>\$CLSTPRM,
+				'mode=i'        =>\$MODE,
+				'annotate'      =>\$ANNOTATE,
+				'picard=s'      =>\$PICARD,
+				'rerun=i'       =>\@RERUNS,
+				'trial'         =>\$TRIAL);
+
+
+my $RATIO;
+$| = 1;
+
+if($TRIAL ne ""){
+    @RERUNS=();
+    push @RERUNS, "0";
+    push @RERUNS, "0-1";
+}
+#$BAM="/env/cns/proj/projet_AKL/scratch/S/ilmap/test10000h-0.6.1/data.sorted.rmdup.bam";
+#$BAM="/env/cns/proj/projet_AKL/scratch/Etcheverry/RUN01/C/data.sorted.rmdup.bam";
+$BAM="/env/cns/proj/projet_AKL/scratch/synthetic_epiRIL/c1c4_COPIA93x80/bwa/data.sorted.rmdup.bam";
+#$BAM="/env/cns/proj/projet_AKL/scratch/Etcheverry/RUN00/AV/data.sorted.rmdup.bam";
+#$BAM="/env/cns/proj/projet_AKL/scratch/Etcheverry/RUN00/AT/data.sorted.rmdup.bam";
+$REFERENCE="/env/cns/proj/projet_AKL/db/Arabidopsis_thaliana.fa";
+
+my $RERUN="";
+
+
+my $X;
+my $Y;
+my $MIN;
+my $READS_LENGTH;
+my $ISMEDIAN;
+my $ISMAD;
+my $DOCMEDIAN;
+my $DOCMAD;
+
+
+
+
+my $MAIN_RUN=0;
+my $root_dir="";
+my $DISCORDANT=0;
+
+#$SAMPLE_SIZE=50000000;
+
+my @DOC ;
+my @SPAN ;
+@DOC=get_DOC_distribution ( $BAM , $DOC_MAD );
+@SPAN= get_insert_size_distribution ( $BAM , $SPAN_MAD );
+#}
+my(@TRANS, @DEL);
+print(join('.', @TRANS));
+my @CONCORDANTID;
+my %OVER_COV = get_high_coverage_positions ( $BAM , $MAX_COV , $COV_EXTENSION , $READ_SIZE );
+
+our %CURRENT_DISCORDANT_PAIRS;
+
+
+print "Analyzing ", $BAM, ".\n";
+
+
+
+# expects an input under the form : chrX:start-end.
+# returns a hash containing for each donor the n° of reads matching uniquely to it
+sub discriminate_donor{
+    my ($file, @donor)=@_;
+    my %donor_uniq_count;
+    `samtools index $file`;
+    foreach my $i (0..$#donor){
+	my $count=0;
+	open (IN, "samtools view $file $donor[$i] |") or die "Impossible to discriminate donor because there is no file.\n";
+	while (<IN> ){
+	    chomp;
+	    my $line=$_;
+            #BEWARE: Uninitialized value in one of the splits in next line
+	    my $tmp=(split('XA:Z:', $line))[1];
+	    if(!defined($tmp) or $tmp eq ""){$count++;next;}
+	    $tmp=(split ('\t', $tmp))[0];
+	    my @alternative_hits=split(';', $tmp);
+
+	    my $hit=0;
+	    foreach my $alternative_hit (@alternative_hits){ #pour chaque donneur, on considère chaque read couvrant ce donneur
+		my @alternative_data=split(',', $alternative_hit);
+		my $alternative_chr=$alternative_data[0]; # si le read mappe sur un autre donneur, on le jette
+		my $alternative_start=abs($alternative_data[1]);
+		for my $j ($i..$#donor){
+		    if($alternative_chr eq (split(':', $donor[$j]))[0] && $alternative_start < (split('-', (split(':', $donor[$j]))[1]))[1]){
+			$hit=1;
+			last;
+		    }
+		}
+		last if($hit==1);
+	    }
+	    if($hit==0){
+		$count++;
+	    }
+
+
+	}
+	close(IN);
+	my $totalcount =`samtools view -c $file $donor[$i]`;
+	$donor_uniq_count{$donor[$i]}=($count/$totalcount);
+	
+    }
+    return %donor_uniq_count;
+}
+
+
+sub generate_disc_sam{
+    my ( $disc_dir ) = @_;
+    my $dir=$OUTPUT_DIR;
+    opendir(my $opendir, $dir);
+    my @files=readdir($opendir);
+    foreach my $file (@files){
+	if($file =~/chr.\.[\+\-]\.(del|ins|dup|inv|trans)\.init$/ && !($file =~/(.+)chr(M|C)(.+)/)){
+	    `cat $dir/$file | awk '{print \$3}' >> $dir/discordant.tmp`;
+	}
+    }
+    `sort $dir/discordant.tmp | uniq > $dir/discordant.prefixes`;
+    `rm $dir/discordant.tmp`;
+    `java -jar $PICARD/FilterSamReads.jar INPUT=$BAM INCLUDE_READS=$dir/discordant.prefixes OUTPUT=$dir/discordant.bam VALIDATION_STRINGENCY=LENIENT 1>&- 2>&-`;
+    `samtools sort -n $dir/discordant.bam $disc_dir/discordant.ReadOrder`;
+    `rm $dir/discordant.prefixes`;
+    `rm $dir/discordant.bam`;
+    
+}
+
+
+#############################################################################
+#                           treat_BAM                                        
+#----------------------------------------------------------------------------
+# Accessory function: redefines the bam file so that it contains only perfect
+# matches. Lone mates are also removed.
+
+
+sub treat_bam{
+    my ( $input, $output, $regx ) = @_;
+    # preprocesses the bam file to remove all reads that do not map perfectly at least once
+    my $newfilename="$output/perfectmatches.bam";
+    open (OUT, "| samtools view -Sb - -o $newfilename");
+    my %reads;
+    my $first="";
+    open ( IN, "samtools view -h $input |" ) || die "Cannot open $input, $!\n";
+    while ( <IN> ){
+	chomp;
+	if ($_ =~ m/^\@/ ) {
+	    print OUT $_, "\n";
+	    next;
+	}
+	my $data=$_;
+	my @tab=split('\t', $data);
+	if ($tab[5] eq "76M" && $data =~ m/.*XM:i:[$regx].*/ ) {
+	    if($first ne "" && (split('\t', $first))[0] eq $tab[0]){
+		print OUT $first, "\n";
+		print OUT $data, "\n";
+		$first="";
+	    }else{
+		$first=$data;
+	    }
+	}
+    }
+    close(IN);
+    close(OUT);
+#    `java -jar $PICARD/SamFormatConverter.jar INPUT=$OUTPUT_DIR/perfectmatches.sam OUTPUT=$newfilename 1>&- 2>&`;
+#    `rm $OUTPUT_DIR/perfectmatches.sam`;
+}
+
+#############################################################################
+#                           sort_BAM_by_name                                        
+#----------------------------------------------------------------------------
+# Accessory function: sorts the bam file by name using samtools. output in
+# global variable NOSORT.
+
+sub sort_bam_by_name{
+    my($input, $output)=@_;
+    my $cmd=`$SAMTOOLS_PATH sort -n $input $output`;
+    die ("samtools exited abnormally: $!\n") if ($? !=0);
+
+}
+
+
+sub concordantSAM2BAM2pileup {
+    my $out="";
+    print("Resorting in chromosomical order...");
+    if($RERUN eq "YES" && -e "$OUTPUT_DIR/concordant_sortedby_name.bam"){
+	print("Previous run used.");
+    }else{
+	sort_bam_by_name("$OUTPUT_DIR/concordant.bam", "$OUTPUT_DIR/concordant_sortedby_name");
+    }
+    print ("Generating pileup...\n");
+    if($RERUN eq "YES" && -e "$OUTPUT_DIR/concordant.pileup"){
+	$out=0;
+	print("Previous run used.");
+    }else{
+	$out=`$SAMTOOLS_PATH pileup -cf $REFERENCE $OUTPUT_DIR/concordant_sortedby_name.bam -o $OUTPUT_DIR/concordant.pileup`;
+    }
+    if ( $? != 0 )
+	{
+	    print "Pileup failed: $!\n";
+	    exit;
+	}
+	else
+	{
+	    printf ">> Success.\n";
+	    print ("Giving control to SSR_finishing_vardetect...\n");
+	    print("\(Output should be $OUTPUT_DIR\/SNP.var\)\n");
+	    $out=`SSR_finishing_varDetect -i $OUTPUT_DIR/concordant.pileup -m $MINCOV -ratio_ID_var $RATIO -ratio_M_var $RATIO >$OUTPUT_DIR/SNP.var`;
+	    print "Done. Exit info was : $out\n";
+	}
+    }
+    
+
+#############################################################################
+#                           annotate_TE                                                             #
+#----------------------------------------------------------------------------                      ###
+# Direct copy from SV_FP.pl                                                                       ##### 
+# Intersects sv.out with an annotation file to select known TE donor sites.                        ###
+# The rest is discarded. Not for use with de-novo discovery of TEs.                                 #
+sub annotate_TE {
+    my $DIR=$OUTPUT_DIR;
+my $BED_INTER ="/env/cns/src/bedtools/BEDTools.v2.7.1/bin/intersectBed";
+`cat $DIR/sv.out | grep \"TRANS\" | sort -k6,6 -k7,7n | awk '{OFS=\"\t\";print \$6,\$7,\$8,\$9,\$10, \$11}'> $DIR/TE_donor.tab`;
+`cat $DIR/sv.out | grep \"TRANS\" | sort -k6,6 -k7,7n | awk '{OFS=\"\t\";print \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12}'> $DIR/TE_acceptor.tab`;
+`$BED_INTER -a $DIR/TE_acceptor.tab -b /env/cns/proj/projet_AKL/db/quesneville.bed -wao > $DIR/TE_acceptor_quesneville.tab`;
+`$BED_INTER -a $DIR/TE_donor.tab -b /env/cns/proj/projet_AKL/db/quesneville.bed -wao > $DIR/TE_donor_quesneville.tab`;
+
+my %donor;
+
+# On traite les TEs qui auraient sauté dans d'autres TEs: Les accepteurs sont contenus dans des régions annotées
+open (IN, "$DIR/TE_acceptor_quesneville.tab") || die "$!,\n";
+    while ( <IN> ){
+	chomp;
+	my @data = split /\t/ , $_;
+	my $found=0;
+	# elsif($donor { "$data[0]:$data[1]..$data[2]" }->[2] != @data[5]){
+	#     my $key= "$data[0]:$data[1]..$data[2]" ;
+	#     my @chars=('a'..'z');
+	#     $key.=$chars[rand @chars];
+	#     push
+	# }
+	
+	# generating a list of acceptors/donors
+	# we look for an already existing acceptor
+        # if there is one, then we check if they have the same donor. If yes, we add the supplementary annotation for that donor
+	# if no, it means the acceptor isn't registered yet or it exists but with another donor. Depending on the case, we append annotation or generate a new key.
+	my $key_re="$data[0]:$data[1]..$data[2]";
+	foreach my $key (grep(/^$key_re/, keys(%donor))){
+	    if($donor{$key}->[1] eq $data[4] && $donor{$key}->[2] == $data[5] && $donor{$key}->[3] == $data[6]){
+		$found=1;
+		$donor { $key }->[11] .=";".$data[14]; # Si l'accepteur est annoté, on met tous les TEs potentiels dans le champ 14
+		last;
+	    }
+	}
+	if($found==0){
+	    if ( ! exists $donor { "$data[0]:$data[1]..$data[2]" } ){ 
+		push @{$donor { "$data[0]:$data[1]..$data[2]" }} ,  @data[3..14]; # On indexe les donneurs par leurs accepteurs 
+	    } 
+	    else{
+#		$donor { "$data[0]:$data[1]..$data[2]" }->[11] .=";".$data[14]; # Si l'accepteur est annoté, on met tous les TEs potentiels dans le champ 14
+		my $key= "$data[0]:$data[1]..$data[2]" ;
+		my @chars=('a'..'z');
+		$key.=$chars[rand @chars];
+		push @{$donor { $key }} ,  @data[3..14];
+	    }
+	}
+	$found=0;
+    }
+close(IN);
+
+# On traite les TEs dont le donneur est annoté
+    foreach my $site (keys %donor){
+	#print $_,"\t", join "\t" , @{$donor{$_}}, "\n";
+	open (IN, "$DIR/TE_donor_quesneville.tab") || die "$!,\n";
+	while ( my $l = <IN> ){
+		chomp $l;
+		my @data = split /\t/ , $l;
+		if ($donor{$site}->[1] eq $data[0] && $donor{$site}->[2] == $data[1] && $donor{$site}->[3] == $data[2] && $data[9]=~/\w/){ #si le
+			$donor{$site}->[12].=";".$data[9];
+		}
+	}
+	close(IN);
+}
+
+# Remove incomprehensible duplicates in donor & acceptor annotation
+    foreach my $site (keys %donor){
+	my %seen = ();
+	my @uniq;
+	if(defined $donor{$site}->[12]){
+	    foreach my $item (split(/;/, $donor{$site}->[12])) {
+		push(@uniq, $item) unless $seen{$item}++;
+	    }
+	    $donor{$site}->[12]=join(";", @uniq);
+	}
+	@uniq=();
+	if(defined $donor{$site}->[13]){
+	    foreach my $item (split(/;/, $donor{$site}->[13])) {
+		push(@uniq, $item) unless $seen{$item}++;
+	    }
+	    $donor{$site}->[13]=join(";", @uniq);
+	}
+
+    }
+
+# Post traitement pour récupérer les informations de donneurs multiples
+    # Ajoute à la fin de chaque élément de %donor un ID unique par accepteur
+    `cat $DIR/sv.formatted | egrep "TRANS" > $DIR/sv.formatted.tmp`;
+    open (IN, "<:utf8", "$DIR/sv.formatted.tmp") || die "$!,\n";
+    while ( <IN> ){
+	chomp;
+	my @data = split /\t/ , $_;
+	my $key_re=$data[3].":".$data[4]."..".$data[5];
+	foreach my $key (grep(/^$key_re/, keys(%donor))){
+	    if($donor{$key}->[$#{@{$donor{$key}}}] ne $data[1]){
+		push(@{$donor{$key}}, $data[1]);
+	    }
+	}
+#	push(@{$donor{$key}}, $data[0]);
+    }
+    close(IN);
+    `rm $DIR/sv.formatted.tmp`;
+    
+    
+    open (OUT, ">:utf8", "$DIR/annotated.tmp") || die "Unable to output : $!.\n";
+    foreach ( keys %donor ){
+	my $key=$_;
+#	my $bracket= $donor{$key}->[$#{@{$donor{$key}}}];
+	# $bracket=(ord(substr($bracket,0,1))<125)?" ":$bracket;
+	# pop(@{$donor{$key}});
+	my $id= $donor{$key}->[$#{@{$donor{$key}}}];
+	pop(@{$donor{$key}});
+	my $keypure=$key;
+	chop($keypure) if ($keypure=~m/.+[a-z]$/);
+	print OUT $id, "\t", $keypure,"\t", join "\t" , @{$donor{$key}}, "\n";
+    }
+    
+    close(OUT);
+    `sort -n $DIR/annotated.tmp > $DIR/annotated.1`;
+    `rm $DIR/annotated.tmp`;
+    `cut -f13 $DIR/sv.out > $DIR/tmp`;
+    `paste $DIR/annotated.1 $DIR/tmp > $DIR/annotated.out`;
+    `rm $DIR/annotated.1`;
+    `cut -f1 $DIR/sv.formatted > $DIR/tmp`;
+    `paste $DIR/tmp $DIR/annotated.out > $DIR/annotated.formatted`;
+    `rm $DIR/tmp`;
+}
+
+#############################################################################
+#			get_DOC_distribution
+#----------------------------------------------------------------------------
+# Take a SAM file, run samtools pileup
+# Return an array that insert size distribution 
+sub get_DOC_distribution {
+    my ( $bam , $n_mad ) = @_;
+    # Depth of coverage analysis	
+    my %indexed_cov;	
+    open ( IN, "$SAMTOOLS_PATH pileup $bam |" ) || die "Cannot open $bam, $!\n";
+    while ( <IN> ){
+	last if ( $. > $SAMPLE_SIZE );
+	my @data = split /\t/, $_;
+	$indexed_cov{$data[1]}= $data[3] ;
+    } 
+    close (IN);
+#    my $cpos=(sort {$a <=> $b} keys %indexed_cov)[0];
+    my $cpos=1;
+    print "Starting at pos $cpos.\n";
+    my @cov;
+    foreach my $pos (sort {$a <=> $b} keys %indexed_cov){
+	print "treating pos $pos \r";
+	if($pos>$cpos){
+	    print "\n$cpos\n";
+#	    exit;
+	    while($pos>$cpos){
+		push(@cov, 0);
+		$cpos++;
+	}
+	}else{
+	    push @cov, $indexed_cov{$pos};
+	}
+	$cpos++;
+
+    }
+    
+    my @doc = get_limits ( \@cov , $n_mad );
+    $doc[2] = ( $doc[2] < 1 ) ? 1 : $doc[2] ;	
+
+    my $nzero=0;
+    my $zerosize=0;
+    my $totalsize=0;
+    my $thissize=0;
+    foreach my $cov_elem (@cov){
+	if( $cov_elem<1){
+	    if( $zerosize==0){
+	    # We are starting an empty region
+	    $zerosize=1;
+	}else{
+	    # We are expanding an empty region
+	    $zerosize++;
+	}
+	}elsif($zerosize!=0){
+	    # we are leaving a zero region 
+	    if($zerosize>10){$nzero++; $totalsize+=$zerosize;}
+	    $zerosize=0;
+	}
+    }
+    print $nzero, " zero regions were found with total size of $totalsize and average size of ", $totalsize/$nzero, ".\n";
+    my $initial_prob=$totalsize/$SAMPLE_SIZE;
+    my $p_0_0=($totalsize-$nzero)/$totalsize;
+    print($nzero, " 0-coverage regions were detected. pi_0=$initial_prob, p_0_0=$p_0_0.\n");
+    print "Computing probabilities for intervals:\n";
+    my $i=1;
+    my %massfunction;
+    while ($initial_prob*($p_0_0**$i)>0){
+#	print "Interval of size $i\tp=", $initial_prob*($p_0_0**$i), "\tlog(p)=", log($initial_prob*($p_0_0**$i)),"\n";
+	$massfunction{$i}=$initial_prob*($p_0_0**$i);
+	$i++;
+    }
+
+    my $numbars=scalar keys %massfunction;
+    my $max=$massfunction{1};
+    use List::Util qw(sum);
+    my $sum=sum(values(%massfunction));
+    foreach my $key ( keys %massfunction){
+	$massfunction{$key}/=$sum;
+    }
+
+    my $cdf=0;
+    $i=1;
+    while($cdf<0.999999){
+	last if(!defined($massfunction{$i}));
+	$cdf+=$massfunction{$i};
+#	print $cdf, "\n";
+#	print "$cdf % were reached at if($cdf*100 % 10==0);
+	$i++;
+    }
+    print "Sum was reached at $sum.\n";   
+    print "90% percentile reached at interval of size $i.\n";
+
+    print "Depth of coverage analysis\nDOC median: ",$doc[0],"\nDOC MAD: ",$doc[1],"\nDOC inf lim: ",$doc[2],"\nDOC sup lim: ",$doc[3],"\n";
+    return @doc;
+}
+#############################################################################
+#			get_insert_size_distribution
+#----------------------------------------------------------------------------
+# Take a BAM file, run samtools
+# Return an array that contains insert size distribution (isd)
+sub get_insert_size_distribution {
+    my ( $bam , $n_mad ) = @_;
+    # Insert size analysis
+    my @insert;
+    open ( IN, "$SAMTOOLS_PATH view $bam|" ) || die "Cannot open $bam, $!\n";
+    while (<IN>){
+	last if ( $. > $SAMPLE_SIZE );
+	my @data = split /\t/, $_;
+	if ( $data[6] eq "=" && $data[8] > 0 ){
+	    push ( @insert, $data[8] );
+	} 
+    } 
+    close (IN);
+    my @isd = get_limits ( \@insert , $n_mad );
+    print "Insert size analysis\nInsert size median: ", $isd[0] ,"\nInsert size MAD: ", $isd[1] ,"\nInsert size inf lim: ", $isd[2] ,"\nInsert size sup lim: " , $isd[3],"\nInsert shift: ", 2 * $n_mad * $isd[1] , "\n"; 
+    return @isd;
+}
+###################################################################################
+#			get_limits
+#----------------------------------------------------------------------------------
+#takes an array of insert sizes
+#returns the median, median + n.MAD, median - n.MAD
+sub get_limits {
+    my ( $data , $n_mad ) = @_;
+    my @quartiles = getBoxPlot ( \@$data );
+    return	( $quartiles[1] , getMAD ( \@$data , $quartiles[1] ), $quartiles[1]- $n_mad * getMAD ( \@$data , $quartiles[1] ), $quartiles[1] + $n_mad * getMAD ( \@$data , $quartiles[1] ) );
+}
+###################################################################################
+#			getMAD
+#----------------------------------------------------------------------------------
+# Take an array
+# Return the median absolute deviation (MAD)
+sub getMAD {
+    my ( $array, $med ) = @_;
+    my @dev;
+    foreach ( @$array ){
+	push ( @dev, abs( $_ - $med ) );
+    }
+    my @MAD = getBoxPlot( \@dev );
+    return $MAD[1];
+}
+##################################################################################
+#			getBoxplot
+#---------------------------------------------------------------------------------
+# Take an array of value 
+# Return the quartiles Q1, Q2, Q3, inf and sup limit values 
+sub getBoxPlot {
+    my ( $array ) = @_;
+    my @sorted_array = sort { $a <=> $b } @$array;
+    my @results = (quartile ( 1, \@sorted_array ) ,  quartile ( 2, \@sorted_array ), quartile ( 3, \@sorted_array ));
+    return ( $results[0] , $results[1] , $results[2] , $results[0] - 1.5 * ( $results[1] - $results[0] ) , $results[2] + 1.5 * ( $results[2] - $results[1] ) );
+}
+
+#############################################################################
+#			quartile
+#----------------------------------------------------------------------------
+# Take a value and an integer (1, 2 or 3) 
+# Return the quartile value Q1, Q2 or Q3
+sub quartile {
+    my ( $quart, $array ) = @_ ;
+    my $K_quantile = ( ( $quart / 4 ) * ( $#{@$array} - 1 ) + 1 );
+    my $F_quantile = $K_quantile - POSIX::floor($K_quantile);	#decimal part
+    $K_quantile = POSIX::floor($K_quantile);			#entire part
+    my $aK_quantile = $array->[ $K_quantile - 1 ];
+    return $aK_quantile if ( $F_quantile == 0 );			#if the decimal part is null
+    my $aKPlus_quantile = $array->[$K_quantile];
+    my $quantile = $aK_quantile + ( $F_quantile * ( $aKPlus_quantile - $aK_quantile ) );#if the decimal part is not null
+    return $quantile;
+}
+
+###################################################################################
+#			get_high_coverage_positions
+#----------------------------------------------------------------------------------
+# Take a BAM file
+# Return a hash of overcovered region
+sub get_high_coverage_positions {
+    my ( $bam_file , $max_cov, $ext, $read_length ) = @_;
+    my %over_cov;
+    if (-e "$OUTPUT_DIR/over_cov.txt"){
+	print "Previous run detected. Fetching over-covered regions...\n";
+	open(IN, "$OUTPUT_DIR/over_cov.txt");
+	while (<IN>){
+	    chomp;
+	    my @data=split /\t/;
+	    push ( @{$over_cov{$data[0]}}, [$data[1], $data[2]]);
+	}
+	close(IN);
+	my $CMD=`cat $OUTPUT_DIR/over_cov.txt | wc -l`;
+	chomp $CMD;
+	print "Fetched ", $CMD, " lines.\n";
+    }else{
+
+	open ( IN , "$SAMTOOLS_PATH pileup $bam_file | awk '{if ( \$4 > $max_cov ){ print \$1\"\\t\"\$2\"\\t\"\$4 } }' |" ) || die "$!\n";
+	my $end;
+	my ( $ref , $start ) = ( "" , 0 );
+	while ( <IN> ){
+	    chomp;
+	    my @data = split /\t/;
+	    if ( $ref eq "" ){
+		( $ref , $start , $end ) = ( $data[0] , $data[1] , $data[1] );
+	    }
+	    elsif ( $ref eq $data[0] ){
+		if ( $end + $ext >= $data[1] ) {
+		    $end = $data[1];
+		}
+		else{
+		    push ( @{$over_cov{$ref}}, [$start, $end + $read_length] );
+		    print $ref,"\t",$start,"\t",$end,"\n";
+		    ( $start , $end ) = ( $data[1] , $data[1] );
+		}
+	    }
+	    else{
+		( $ref , $start , $end ) = ( $data[0] , $data[1] , $data[1] );
+	    }
+	}
+	print "High covered region ( > $max_cov ) detection done\n";
+	open ( OV , ">$OUTPUT_DIR/over_cov.txt") || die "Cannot open $OUTPUT_DIR/over_cov.txt, $!\n";
+	foreach my $ref ( keys %over_cov ) {
+	    foreach my $i ($#{@{$over_cov{$ref}}}){
+		print OV $ref,"\t",$over_cov{$ref}->[$i]->[0],"\t",$over_cov{$ref}->[$i]->[1],"\n";
+		
+	    }
+	}
+	close (OV);
+    }
+    return %over_cov;
+
+
+}
+#########################################################################################################
+#
+#--------------------------------------------------------------------------------------------------------
+# take a BAM file
+# return
+sub bam2discordant_pairs {
+    my ( $bam , $output_dir , $lim_inf , $lim_sup , $lib_type , $extend_overlap ) = @_;
+    my $chemin;
+    opendir ( my $open_dir , $output_dir ) || die "Cannot open $output_dir, $!\n";
+    my @filelist= grep (/chr.\.[\+\-]\.(del|ins|dup|inv|trans)\.init/, readdir($open_dir));
+    if (scalar(@filelist) > 0){
+	print "Previous run detected. ",scalar(@filelist)," discordant pair files were found. Do you want to reuse them to spare time?(y/N)\n";
+	print "(Beware, there is no guarantee that the previous run was complete or used the same parameters you did)";
+	my $input=<>;
+	chomp($input);
+	if ($input eq "y" or $input eq "Y"){
+	    print "Skipping...\n";
+	    $RERUN="YES";
+	    return;
+	}
+    }
+    print "Detection of discordant reads\n";
+    if ($NOSORT eq "") {
+	print "Sorting by name... (this step can be lengthy)\n";
+	sort_bam_by_name($BAM, "$OUTPUT_DIR/input_sortedby_name");
+	$chemin="$output_dir/input_sortedby_name.bam";
+    }
+    else{
+	$chemin=$NOSORT;
+    }
+    my $ref = "";
+    my @multiple_hits;
+    my $disc_HANDLE;
+    my $conc_HANDLE;
+    if($MAIN_RUN){
+	open ($disc_HANDLE, "|-", "samtools view -bS - -o $OUTPUT_DIR/discordant.bam") or die("open: $!");
+	open ($conc_HANDLE, "|-", "samtools view -bS - -o $OUTPUT_DIR/concordant.bam") or die("open: $!");
+    }
+    open ( IN, "$SAMTOOLS_PATH view -h $chemin |" ) || die "$!\n";
+    my $flag="";
+    while ( <IN>  ){
+	chomp;
+	my $line=$_;
+	# Following block writes the headers for conc and disc files.
+	if($line =~ m/^\@/ && $MAIN_RUN){
+	    print $conc_HANDLE $line, "\n";
+	    print $disc_HANDLE $line, "\n";
+	    next;
+	}
+	my @data = split /\t/ , $line;
+	next if ( $data[5] eq "*" || $data[6] eq "*" || ( ( $data[3] == $data[7] ) &&  ( $data[6] eq "=" ) ) );#|| $data[4] == 0 ); #on avance jusqu'à la première ligne intéressante suivante
+	# paramètre UNIQ ne sélectionnant que les uniqHit
+	my $UNIQ="";
+	if($UNIQ ne ""){
+	    if($flag ne ""){
+		if ($flag eq $data[0]){$flag="";next;}
+		else{$flag="";}
+	    }
+	    if($UNIQ ne "" && join("\t", @data)!=~/(.*)X0:i:1(.*)X1:i:0(.*)/){
+		$flag=$data[0];
+		next;
+	    }
+	}
+	if ( $ref eq "" ){ #au début on prend la première bonne séquence comme référence et on ajoute tous ses mappings au format perso
+	    $ref = $data[0];
+	    push ( @{$multiple_hits[0]} ,  get_sam_multiple_records ( \@data ) );
+	}
+	elsif ( $data[0] eq $ref ){# si une référence existe on ajoute les mappings du read apparié à la suite dans multiple_h
+	    push ( @{$multiple_hits[1]} , get_sam_multiple_records ( \@data ) ) ;
+	}
+	else{ # une référence existe mais on tombe sur une autre paire valide
+	    # on envoie tous les multiple hits déjà trouvés à analyse_one_pair...
+	    analyse_one_pair_mapping_results ( \@multiple_hits,  $lim_inf , $lim_sup , $lib_type , $output_dir, $extend_overlap, $conc_HANDLE, $disc_HANDLE);
+	    $ref = $data[0];
+	    @multiple_hits = ();
+	    push ( @{$multiple_hits[0]} ,  get_sam_multiple_records ( \@data ) ) ;
+	}
+    }
+    analyse_one_pair_mapping_results ( \@multiple_hits,  $lim_inf , $lim_sup , $lib_type , $output_dir, $extend_overlap, $conc_HANDLE, $disc_HANDLE);
+    if($MAIN_RUN){
+	close($disc_HANDLE);
+	close($conc_HANDLE);
+    }
+    close (IN);
+    print_discordant_pairs ( \%CURRENT_DISCORDANT_PAIRS , $output_dir );
+    print("Sorting discordant file...\n");
+    `samtools sort $root_dir/discordant.bam $root_dir/discordant.sorted`;
+    die("Samtools sort failed on  $root_dir/discordant.bam.\n") if($? != 0);
+    `rm $root_dir/discordant.bam; mv $root_dir/discordant.sorted.bam $root_dir/discordant.bam`;
+}
+
+
+
+##########################################################################################################
+#					get_sam_multiple_records
+#---------------------------------------------------------------------------------------------------------
+# prend en entrée un tableau de colonnes SAM
+# retourne un tableau à un format personnalisé: 
+# reference sequence name
+# position
+# une partie du FLAG (uniqt sens)
+# séquence
+# read name
+# qualité
+# ==============
+# s'il existe d'autres mappings, pour chaque mapping
+# ==============
+# le chromosome
+# la position
+# le sens
+# le sens du père
+# séquence du père
+# read name du père
+# qualité du père
+# distance
+sub get_sam_multiple_records {
+    my ( $data ) = @_;
+    my @records;
+    my $pos = $data->[3];
+    my $sens = ( ( $data->[1] & 0x10 )  == 16 ) ? "-" : "+";
+    my $cigar = $data->[5];
+    push @records , [ $data->[2] , $pos , $sens, $data->[9], $data->[10] , $data->[0] , $data->[4], $data->[1], $data->[5], $data->[6], $data->[7], $data->[8], @{$data}[11..$#{$data}]  ];
+    my $line = join "\t" , @$data;
+    if ( $line =~/\t(XA\:.+\;)/){
+	my @mult = split ( /\;/ , $1);
+	foreach my $j ( 0..$#mult ){ 
+	    $mult[$j] =~s/.+\://g; #pour chaque autre mapping, on supprime les noms des champs et on parse (chr, pos, cigar, nm)
+	    my @new_data = split ( /\,/ , $mult[$j] );
+	    $sens = $new_data[1]; 
+	    $sens =~s/\w*//g;
+	    $pos = $new_data[1];
+	    $pos =~s/[\+\-]//;
+	    $cigar = $new_data[2];
+	    push @records ,  [ $new_data[0], $pos, $sens,  $data->[9], $data->[10] , $data->[0] , $data->[4] , $new_data[3], $cigar ];
+# Attention le CIGAR n'est jamais utilisé.
+	    undef ( @new_data );
+	}
+	undef ( @mult );
+    }
+    return @records;
+    undef @records;
+}
+
+#############################################################################################
+#			analyse_one_pair_mapping_results
+#-------------------------------------------------------------------------------------------
+# take: an array of array containing one pair mapping features
+# load: the selected pair hash of array, keys are pair case (chr_a.sens_a.chr_b.sens_b), values are array of pair features (pair name, pos_a, pos_b)
+sub analyse_one_pair_mapping_results {
+    my ( $pair_to_analyse , $lim_inf , $lim_sup , $lib , $output_dir , $overlap_limit, $conc_handle, $disc_handle) = @_;
+
+    my $check = is_proper_mapped ( $pair_to_analyse , $lim_inf, $lim_sup , $lib );
+
+    if ((!defined($check)) || (!defined($check->[0])) || ! @{$check->[0]} ){	# si la paire ne mappe pas (discordante) alors le tableau est vide 
+	my %non_overlapping_cases = get_classified_multiple_hits ( $pair_to_analyse, $lim_inf, $lim_sup , $overlap_limit );
+	foreach my $case ( keys %non_overlapping_cases ){
+	    foreach my $i ( 0 .. $#{@{$non_overlapping_cases{$case} } } ){
+		push @{$CURRENT_DISCORDANT_PAIRS{$case}} , [ $non_overlapping_cases{$case}->[$i]->[0] , $non_overlapping_cases{$case}->[$i]->[1] , $non_overlapping_cases{$case}->[$i]->[2] ];
+		#print $case,"\t",$non_overlapping_cases{$case}->[$i]->[0],"\t",$non_overlapping_cases{$case}->[$i]->[1],"\t",$non_overlapping_cases{$case}->[$i]->[2],"\n";
+#		open( DISCORDANT, $disc_handle) or die("open: $!");
+		if($MAIN_RUN){
+		    print({$disc_handle} join("\t", $pair_to_analyse->[0]->[0]->[5], $pair_to_analyse->[0]->[0]->[7],$pair_to_analyse->[0]->[0]->[0], $pair_to_analyse->[0]->[0]->[1], $pair_to_analyse->[0]->[0]->[6], $pair_to_analyse->[0]->[0]->[8],$pair_to_analyse->[0]->[0]->[9], $pair_to_analyse->[0]->[0]->[10], $pair_to_analyse->[0]->[0]->[11], $pair_to_analyse->[0]->[0]->[3], $pair_to_analyse->[0]->[0]->[4], @{$pair_to_analyse->[0]->[0]}[12..$#{$pair_to_analyse->[0]->[0]}]), "\n");
+		
+		    print ({$disc_handle} join("\t", $pair_to_analyse->[1]->[0]->[5], $pair_to_analyse->[1]->[0]->[7], $pair_to_analyse->[1]->[0]->[0], $pair_to_analyse->[1]->[0]->[1], $pair_to_analyse->[1]->[0]->[6], $pair_to_analyse->[1]->[0]->[8], $pair_to_analyse->[1]->[0]->[9], $pair_to_analyse->[1]->[0]->[10], $pair_to_analyse->[1]->[0]->[11], $pair_to_analyse->[1]->[0]->[3], $pair_to_analyse->[1]->[0]->[4], @{$pair_to_analyse->[1]->[0]}[12..$#{$pair_to_analyse->[1]->[0]}]), "\n");# if defined($pair_to_analyse->[1]);
+		}
+
+	    }
+	}
+	undef %non_overlapping_cases;	
+    }
+    elsif (@{$check->[0]} and scalar(@{$check->[0]})==1 && $MAIN_RUN) # sinon ce ne sont que les MP matches uniques qui nous intéressent
+{
+    my @splitted=split('\t', $check->[0]->[0]);
+#    open( CONCORDANT, $conc_handle) or die("open: $!");
+    my $i=$splitted[1];
+    my $j=$splitted[2];
+
+    if($splitted[1]!=0){ #Si le mapping correct n'est pas le mapping principal, remplacer par les données du XA
+	my $flag= $pair_to_analyse->[0]->[0]->[7];
+	my $length=max($pair_to_analyse->[1]->[$j]->[1], $pair_to_analyse->[0]->[$i]->[1])-min($pair_to_analyse->[1]->[$j]->[1], $pair_to_analyse->[0]->[$i]->[1]); #unsure about this calculation, supposed to be #rightmost_base - #leftmost_base, here max(pos1, 2)-min(pos1, 2)
+	if($pair_to_analyse->[0]->[0]->[1] ne $pair_to_analyse->[0]->[$i]->[1]){
+	    $flag=($pair_to_analyse->[0]->[$i]->[1] eq "-")? ($flag | 0x10) : ($flag ^ 0x10);
+	}
+	if($NOLUTHER eq ""){
+	    print({$conc_handle} join("\t", $pair_to_analyse->[0]->[0]->[5], 
+				  $flag,
+				  $pair_to_analyse->[0]->[$i]->[0], 
+				  $pair_to_analyse->[0]->[$i]->[1], 
+				  255, 
+				  $pair_to_analyse->[0]->[0]->[8],
+				  '=', 
+				  $pair_to_analyse->[0]->[0]->[10], 
+				  $length, 
+				  $pair_to_analyse->[0]->[0]->[3], 
+				  $pair_to_analyse->[0]->[0]->[4], 
+				  "NM:i:$pair_to_analyse->[0]->[$i]->[7]\n"));
+	}	      
+    }else {
+	print({$conc_handle} join("\t", $pair_to_analyse->[0]->[0]->[5], $pair_to_analyse->[0]->[0]->[7],$pair_to_analyse->[0]->[0]->[0], $pair_to_analyse->[0]->[0]->[1], $pair_to_analyse->[0]->[0]->[6], $pair_to_analyse->[0]->[0]->[8],$pair_to_analyse->[0]->[0]->[9], $pair_to_analyse->[0]->[0]->[10], $pair_to_analyse->[0]->[0]->[11], $pair_to_analyse->[0]->[0]->[3], $pair_to_analyse->[0]->[0]->[4], @{$pair_to_analyse->[0]->[0]}[12..$#{$pair_to_analyse->[0]->[0]}]), "\n");
+
+    }
+
+    if($splitted[2]!=0){#Idem pour le read '2'
+			    my $flag= $pair_to_analyse->[1]->[0]->[7];
+			    my $length=max($pair_to_analyse->[1]->[$j]->[1], $pair_to_analyse->[0]->[$i]->[1])-min($pair_to_analyse->[1]->[$j]->[1], $pair_to_analyse->[0]->[$i]->[1]); #unsure about this calculation, supposed to be #rightmost_base - #leftmost_base, here max(pos1, 2)-min(pos1, 2)
+			    if($pair_to_analyse->[1]->[0]->[1] ne $pair_to_analyse->[1]->[$j]->[1]){
+				$flag=($pair_to_analyse->[1]->[$j]->[1] eq "-")? ($flag | 0x10) : ($flag ^ 0x10);
+			    }
+			    if($NOLUTHER eq ""){
+				print({$conc_handle} join("\t", $pair_to_analyse->[0]->[0]->[5], 
+						      $flag,
+						      $pair_to_analyse->[0]->[$i]->[0], 
+						      $pair_to_analyse->[0]->[$i]->[1], 
+						      255, 
+						      $pair_to_analyse->[0]->[0]->[8],
+						      '=', 
+						      $pair_to_analyse->[0]->[0]->[10], 
+						      $length, 
+						      $pair_to_analyse->[0]->[0]->[3], 
+						      $pair_to_analyse->[0]->[0]->[4], 
+						      "NM:i:$pair_to_analyse->[0]->[$i]->[7]\n"));
+			    }	      
+			}
+    else{
+
+	print ({$conc_handle} join("\t", $pair_to_analyse->[1]->[0]->[5], $pair_to_analyse->[1]->[0]->[7], $pair_to_analyse->[1]->[0]->[0], $pair_to_analyse->[1]->[0]->[1], $pair_to_analyse->[1]->[0]->[6], $pair_to_analyse->[1]->[0]->[8], $pair_to_analyse->[1]->[0]->[9], $pair_to_analyse->[1]->[0]->[10], $pair_to_analyse->[1]->[0]->[11], $pair_to_analyse->[1]->[0]->[3], $pair_to_analyse->[1]->[0]->[4], @{$pair_to_analyse->[1]->[0]}[12..$#{$pair_to_analyse->[1]->[0]}]), "\n");
+    }
+}
+
+
+
+}
+
+
+
+###############################################################################################
+#				is_proper_mapped
+#-------------------------------------------------------------------------------------------
+# take: 1. an array of array containing one pair mapping results (each hit is an array element containing a tab split SAM lines ),
+#	2. the lower fragment size limit (bp), 
+#	3. the upper fragment size limit (bp), 
+#	4. the type of library (MP or PE) 
+# return: "" si la paire est discordante, "MP suivi d'un tab-split string:
+#
+sub is_proper_mapped {
+    my ( $pairs, $lim_inf, $lim_sup, $lib ) = @_;
+    my @alignments=[];
+    # nouvel algorithme: retourner uniquement les paires qui possèdent un mapping concordant UNIQUE en MP.
+# retourner ici un array au lieu d'une ligne
+#plus haut: si l'array MP contient plus d'une ligne, discard
+# s'il ne contient qu'une ligne et que cette ligne correspond à l'alignement principal pour 1 : écrire 1 sans XA
+# s'il ne contient qu'une ligne et que cette ligne correspond à l'alignement principal pour 2 ! écrire 2 sans XA
+# s'il ne contient qu'une ligne et que l'alignement est dans XA pour l'un des deux: récrire l'alignement principal avec les infos de XA et écrire.
+    for my $i ( 0 .. $#{@{$pairs->[0]}}){
+	for my $j ( 0 .. $#{@{$pairs->[1]}} ) {
+	    #test MP - looking for proper mapped pair (MP reverse forward, and size > lim inf , size < lim sup
+	    if ( $pairs->[0]->[$i]->[0] eq $pairs->[1]->[$j]->[0] && ( ($pairs->[0]->[$i]->[1] > $pairs->[1]->[$j]->[1] && $pairs->[0]->[$i]->[2] eq "+" && $pairs->[1]->[$j]->[2] eq "-" && $pairs->[0]->[$i]->[1] - $pairs->[1]->[$j]->[1] > $lim_inf &&  $pairs->[0]->[$i]->[1] - $pairs->[1]->[$j]->[1] < $lim_sup ) || ($pairs->[0]->[$i]->[1] < $pairs->[1]->[$j]->[1] && $pairs->[0]->[$i]->[2] eq "-" && $pairs->[1]->[$j]->[2] eq "+" && $pairs->[1]->[$j]->[1] - $pairs->[0]->[$i]->[1] >$lim_inf &&  $pairs->[1]->[$j]->[1] - $pairs->[0]->[$i]->[1] < $lim_sup) )  ){
+		push(@{$alignments[0]},"MP\t".$i."\t".$j."\t".join ( "\t" , @{$pairs->[0]->[$i]} )."\t".join ("\t", @{$pairs->[1]->[$j]})."\n");	
+	    }
+	    #test PE - looking for proper mapped pair (PE forward reverse, and size > lim inf , size < lim sup
+	    if ( $pairs->[0]->[$i]->[0] eq $pairs->[1]->[$j]->[0] && ( ($pairs->[0]->[$i]->[1] > $pairs->[1]->[$j]->[1] && $pairs->[0]->[$i]->[2] eq "-" && $pairs->[1]->[$j]->[2] eq "+" && $pairs->[0]->[$i]->[1] - $pairs->[1]->[$j]->[1] > 100 &&  $pairs->[0]->[$i]->[1] - $pairs->[1]->[$j]->[1] < 700 ) || ($pairs->[0]->[$i]->[1] < $pairs->[1]->[$j]->[1] && $pairs->[0]->[$i]->[2] eq "+" && $pairs->[1]->[$j]->[2] eq "-" && $pairs->[1]->[$j]->[1] - $pairs->[0]->[$i]->[1] >100 &&  $pairs->[1]->[$j]->[1] - $pairs->[0]->[$i]->[1] < 700) )  ){
+		push(@{$alignments[1]}, "PE\t".join ( "\t" , @{$pairs->[0]->[$i]} )."\t".join ("\t", @{$pairs->[1]->[$j]})."\n");
+	    }
+	}
+    }
+    undef $pairs;
+    
+    return \@alignments;
+    
+}
+
+##############################################################################################
+#				get_classified_multiple_hits
+#------------------------------------------------------------------------------------------
+# take: an array of array containing one pair mapping results ( each hit is an array element, each array element is an array containing a tab split SAM lines 
+# return: an hash of non overlapped cases of pairs 
+sub get_classified_multiple_hits {
+	my ( $pairs, $lim_inf, $lim_sup , $overlap_limit ) = @_;
+	my %pair_cases;
+	my $read_name = $pairs->[0]->[0]->[5];
+	for my $i ( 0 .. $#{@{$pairs->[0]}} ){
+		for my $j ( 0 .. $#{@{$pairs->[1]}} ) {
+			my ( $chr_a , $chr_b , $pos_a , $pos_b , $sens_a , $sens_b ) = ( $pairs->[0]->[$i]->[0] , $pairs->[1]->[$j]->[0] , $pairs->[0]->[$i]->[1] , $pairs->[1]->[$j]->[1],  $pairs->[0]->[$i]->[2] , $pairs->[1]->[$j]->[2] );
+			if ( $chr_a ne $chr_b ){
+				if ( exists $pair_cases{"$chr_b.$sens_b.$chr_a.$sens_a.trans"} ){
+					push @{$pair_cases{"$chr_b.$sens_b.$chr_a.$sens_a.trans"}}, [ $pos_b, $pos_a ] ;
+				}
+				else{
+					push @{$pair_cases{"$chr_a.$sens_a.$chr_b.$sens_b.trans"}}, [ $pos_a, $pos_b ] ;
+				}
+			}
+			else{
+				if ( $pos_a > $pos_b ){
+					my ( $chr_c , $sens_c , $pos_c ) = ( $chr_a , $sens_a , $pos_a );
+					( $chr_a , $sens_a , $pos_a  ) = ( $chr_b , $sens_b , $pos_b );
+					( $chr_b , $sens_b , $pos_b ) = ( $chr_c , $sens_c , $pos_c );
+				}
+				if ( $pos_b-$pos_a >= $lim_sup && $sens_a eq "-" && $sens_b eq "+" && $pos_a != $pos_b){
+					push @{$pair_cases{"$chr_a.$sens_a.$chr_b.$sens_b.del"}}, [ $pos_a, $pos_b ] ;
+				}
+				elsif ( $pos_b-$pos_a <= $lim_sup && $sens_a eq "-" && $sens_b eq "+" && $pos_a != $pos_b ){
+					push @{$pair_cases{"$chr_a.$sens_a.$chr_b.$sens_b.ins"}}, [ $pos_a, $pos_b ] ;
+				}
+				elsif ( $sens_a eq $sens_b && $pos_a != $pos_b ){
+					push @{$pair_cases{"$chr_a.$sens_a.$chr_b.$sens_b.inv"}}, [ $pos_a, $pos_b ] ;
+				}
+				elsif ( $sens_a eq "+" && $sens_b eq "-" && $pos_a != $pos_b ){
+					push @{$pair_cases{"$chr_a.$sens_a.$chr_b.$sens_b.dup"}}, [ $pos_a, $pos_b ] ;
+				}
+			}
+		}
+	}
+	
+	# Get non overlapping pairs
+	my %non_overlapped_pair;
+	foreach my $case ( keys %pair_cases ){
+		my @good_pairs;
+		my @sorted_pair_case = sort { $a->[0] <=> $b->[0] } @{$pair_cases{$case}};
+		if ( $#{@{$pair_cases{$case}}} > 0 ){
+			@good_pairs = get_pair_cluster ( \@sorted_pair_case, $case , $overlap_limit );
+			foreach my $i ( 0 .. $#good_pairs ){
+				push @{$non_overlapped_pair{$case}} , [ $good_pairs[$i]->[0], $good_pairs[$i]->[1] , $read_name ] ;
+			}
+		}
+		else {
+			push @{$non_overlapped_pair{$case}} , [ $pair_cases{$case}[0]->[0], $pair_cases{$case}[0]->[1] , $read_name ] ; 
+		}
+		undef ( @good_pairs );
+		undef ( @sorted_pair_case);
+	}
+	undef ( %pair_cases );
+	undef ( $pairs );
+
+	# Get likely discordant pairs for low complexity regions
+	my $good_case = "";
+	my $flag = 0; 
+	foreach my $case ( keys %non_overlapped_pair  ) {
+		if ( $case =~/del|inv|dup|ins/ ){
+			foreach my $i ( 0 .. $#{@{$non_overlapped_pair{$case} } } ){
+				if ( ( $non_overlapped_pair{$case}[$i]->[1] - $non_overlapped_pair{$case}[$i]->[0] ) <= 100000 ){
+					$good_case = $case ;
+					$flag = 1;
+					last;					
+				}
+			}
+		}
+		last if ( $flag == 1 );
+	}
+
+	# remove artefactual cases
+	if  ( $good_case ne "" ){
+		foreach my $case  ( keys %non_overlapped_pair ){
+			delete $non_overlapped_pair{$case} if ( $case ne $good_case );
+		}
+	}	
+	return %non_overlapped_pair;
+}
+
+############################################################################################################
+#					get_pair_cluster
+#-----------------------------------------------------------------------------------------------------------
+# take:
+# return:
+sub get_pair_cluster{
+	my ( $pair , $case , $overlap_limit ) = @_;
+	my @clust;
+	my $n_clust = 0;
+	# initialize cluster
+	push @{$clust[$n_clust]} , $pair->[0];
+	for my $k ( 1 .. $#{@$pair} ){
+		my @overlap = is_overlapping ($pair->[$k]->[0], $pair->[$k]->[0] + $overlap_limit, $pair->[$k-1]->[0], $pair->[$k-1]->[0] + $overlap_limit, 0 );
+		if ( $overlap[0] > 0 ){
+			push @{$clust[$n_clust]} , $pair->[$k];
+		}
+		else{
+			++$n_clust;
+			push @{$clust[$n_clust]} , $pair->[$k];
+		}
+	}
+	# take a random pair from overlapping region
+	my @non_overlapped_pair;
+	for my $k ( 0 .. $#clust ){
+		my $rand = int ( rand ( $#{@{$clust[$k]}} ) );
+		push ( @non_overlapped_pair , [ $clust[$k]->[$rand]->[0], $clust[$k]->[$rand]->[1] ] );
+	}
+	undef @clust;
+	return @non_overlapped_pair;
+}
+
+###############################################################################
+#			print_discordant_pairs
+#------------------------------------------------------------------------------
+# take: a hash of discordant pair
+# return: print the result in files
+sub print_discordant_pairs{
+	my ( $pair, $output_dir ) = @_;
+	foreach my $case ( keys %$pair ){
+		my $A = 0;
+		my $B = 1;
+		my $different_chr = $case;
+		$different_chr =~/chr(\w+)\.[\-\+]\.chr(\w+)\.[\-\+]\..+/;
+		my $chr1 = $1;
+		my $chr2 = $2; 
+		my @discordant_pairs = sort { $a->[0] <=> $b->[0] } @{$pair->{$case}};
+		if ( $chr1 ne $chr2 ){
+			if ( $chr1 =~/\d/ && $chr2=~/\d/ && $chr1 > $chr2 ){
+				$A = 1;
+				$B = 0;				
+				$case =~s/chr(\w+)\.([\-\+])\.chr(\w+)\.([\-\+])\.(.+)/chr$3.$4.chr$1.$2.$5/;				
+			}
+			if ( $chr1=~/\D/ || $chr2=~/\D/ ){
+				my @order = ( $chr1 , $chr2 );
+				@order = sort { $a cmp $b } @order;
+				if ( $order[0] ne $chr1 ){
+					$A = 1;
+					$B = 0;
+					$case =~s/chr(\w+)\.([\-\+])\.chr(\w+)\.([\-\+])\.(.+)/chr$3.$4.chr$1.$2.$5/;					
+				}
+			}
+		}
+		open ( OUT ,">>$output_dir/$case.init" );
+		foreach my $i ( 0 .. $#discordant_pairs ){
+			print OUT $discordant_pairs[$i]->[$A] , "\t" , $discordant_pairs[$i]->[$B] , "\t", $discordant_pairs[$i]->[2] , "\n" ;
+		}
+		close ( OUT );
+	}
+	# sort and uniq	
+	opendir ( my $open_dir , $output_dir ) || die "Cannot open $output_dir, $!\n";
+	my @files = readdir ( $open_dir );
+	foreach my $file ( @files ){
+		if ( $file=~/.\.init$/ ){
+			`sort -k1,1n $output_dir/$file | awk '{if ( vu[\$1"@"\$2]!=1 ){print \$0;vu[\$1"@"\$2]=1}}' > $output_dir/$file.sorted;rm $output_dir/$file; mv $output_dir/$file.sorted $output_dir/$file`; 
+		}
+	}
+	closedir ($open_dir);
+}
+
+
+#########################################################################################################
+#					cluster_disc_pairs
+#--------------------------------------------------------------------------------------------------------
+#
+#
+sub cluster_disc_pairs {
+    my ( $dir , $x_lim , $y_lim , $min_pair , $read_length ) = @_;
+    opendir ( my $open_dir , $dir );
+    my @files = readdir ( $open_dir );
+    foreach my $file ( @files ){
+	if ( $file =~/chr.\.[\+\-]\.(del|ins|dup|inv|trans)\.init$/ && !($file =~/(.+)chr(M|C)(.+)/)){
+	    if (-e "$dir/$file.clustered" && $RERUN eq "YES"){
+		print ("Reusing $dir/$file.clustered...\n");
+	    }else{
+		print "Clustering of $file...\n";
+		if ((-s "$dir/$file") > 20000000){
+		    print "Size of cluster too big. Running on 1To RAM.\n";
+			`ssh etna4 $SLC -i $dir/$file -o $dir/$file.clustered -l $x_lim -n $y_lim -m $min_pair -t 0 -r $read_length`;
+		}
+		else{
+		`$SLC -i $dir/$file -o $dir/$file.clustered -l $x_lim -n $y_lim -m $min_pair -t 0 -r $read_length`;
+		}
+	    }
+	    if(-e "$dir/$file.clustered.merged" && $RERUN eq "YES" ){
+		print ("Reusing $dir/$file.clustered.merged...\n");
+
+	    }
+	    else{
+		print "Merging of $file...\n";
+		merge_clusters ( "$dir/$file.clustered" , $read_length , $SPAN[0] , $y_lim  , $DOC[2] );
+	    }
+	    #`rm $dir/$file.clustered` if ( $file =~/chr/ && -s "$dir/$file.clustered" == 0);
+	}
+    }
+    close ( $open_dir );
+}
+###########################################################################################################
+#					merge_clusters
+#----------------------------------------------------------------------------------------------------------
+#
+#
+sub merge_clusters { 
+	use List::Util qw(max min);	
+	my ( $file, $reads_l, $insert, $insert_shift, $min_coverage ) = @_;
+	my @clusters = get_clusters ( $file ); # effectuer un split (\t) sur les fichiers .clustered
+	my @result;                            # [0] est le n° du cluster
+	my @cluster_type = split '\.', $file;  # [1] est #reads, [2] le début de l'accepteur, [3] la fin, [4] et [5] pareil pour le donneur, [6] est une position inconnue, [7] une quantité décimale inconnue, [8] une liste de positions de reads.
+	my @is_clust;
+	# initialization 
+	for my $i ( 0 .. $#clusters ){ $is_clust[$i] = 0 }
+	my ( $n, $start_a, $end_a, $start_b, $end_b, $coord ) = ( "", "", "", "", "", "" );	
+	my $count=0;
+	my $count_trans=0;
+	for my $i ( 0 .. $#clusters ){ # pour chaque cluster dans le fichier
+		if( $is_clust[$i] == 0 ){
+			( $n , $start_a, $end_a, $start_b, $end_b, $coord ) = ( $clusters[$i][1], $clusters[$i][2], $clusters[$i][3] + $reads_l, $clusters[$i][4], $clusters[$i][5] + $reads_l, $clusters[$i][6] );
+			$coord = $clusters[$i][8] if ( $cluster_type[4]=~/del|ins|dup|inv/ ); # coord est le champ [6] si on a une translocation, la liste de positions [8] sinon.
+			my $nclust = 1;
+			# merging
+			for ( my $j = $i+1; $j <= $#clusters; $j++ ){ # pour chaque cluster non encore visité
+				last if ( $end_a + ( 2 * $insert_shift ) < $clusters[$j][2] ); #on saute si le début de l'accepteur suivant est trop loin
+				next if( $is_clust[$j] == 1 );
+				my @overlap_right = is_overlapping ( $start_b , $end_b , $clusters[$j][4] , $clusters[$j][5] , 0 );
+                                # return: an array (intersection_size, union_size, union_min, union_max)
+				my @overlap_left = is_overlapping ( $start_a , $end_a , $clusters[$j][2] , $clusters[$j][3] , 0 );
+				my @set_diffs_right = (abs($clusters[$j][4]-$start_b),abs($clusters[$j][4]-$end_b),abs($clusters[$j][5]-$start_b),abs($clusters[$j][5]-$end_b));
+				my @set_diffs_left = (abs($clusters[$j][2]-$start_a),abs($clusters[$j][2]-$end_a),abs($clusters[$j][3]-$start_a),abs($clusters[$j][3]-$end_a));
+				my ( $left_is_near, $right_is_near ) = ( 0, 0 );
+				foreach my $diff (@set_diffs_right){
+					$right_is_near = 1 if ( $diff <= $insert_shift );
+				}
+				foreach my $diff (@set_diffs_left){
+					$left_is_near = 1 if ( $diff <= $insert_shift );
+				}
+				if ( $left_is_near == 1 && $right_is_near == 1){
+					$n += $clusters[$j][1]; 
+					 ( $start_a , $end_a , $start_b, $end_b ) = ( $overlap_left[2] , $overlap_left[3] , $overlap_right[2], $overlap_right[3] );
+					$coord .= $clusters[$j][8] if ( $cluster_type[4]=~/del|ins|dup|inv/ );
+					$is_clust[$j] = 1;
+					++$nclust;
+				}	
+			}
+#			 print "$nclust clusters out of $#clusters have been merged into this one.\n";	
+			### Get merged or non-merged cluster -------------------------------------
+			# filter result for deletion signatures
+#			print "Now treating a $cluster_type[4] cluster.";
+			if (  $cluster_type[4]=~/del|dup|inv/  && $end_a < $start_b && $end_a-$start_a <= $insert + $insert_shift && $end_b-$start_b <= $insert + $insert_shift){
+				
+				my @stat = get_coordonate_stat ( $coord );
+				++$count;
+				if ( $start_b - $end_a <=  $stat[0] - $insert + 3 * $stat[1] && $start_b - $end_a >=  $stat[0]-$insert - 3 * $stat[1] ){# ){
+					if ( $stat[0] - $insert <= 100000 && $stat[1] < $SPAN[1] * 2 * $SPAN_MAD ){
+						if ( $n >= $insert * $min_coverage / ( 2 * $reads_l ) ){
+							push @result, [ $count, $n, $start_a, $end_a, $start_b, $end_b, int( $stat[0] - $insert ), $stat[1] ];
+						}
+					}
+					elsif ( $n >= ($end_b-$start_b) * $min_coverage / ( 2* $reads_l ) && $n >= ($end_a-$start_a) * $min_coverage / ( 2 * $reads_l ) ){
+						push @result, [ $count, $n, $start_a, $end_a, $start_b, $end_b, int( $stat[0] - $insert ), $stat[1] ];
+					}
+				}
+			} # result for insertion signatures
+			elsif ( $cluster_type[4] eq "ins" && $end_a <= $start_b &&  $end_a-$start_a <= $insert + $insert_shift ){
+				my @stat = get_coordonate_stat ( $coord );
+				if ( $start_b - $end_a <=  $insert-$stat[0] + 3*$stat[1] && $start_b - $end_a >=  $insert-$stat[0] - 3*$stat[1] && $stat[1] < $SPAN[1] * 2 * $SPAN_MAD ){
+					if ( $stat[0] * $min_coverage / $reads_l >= $n ){
+						++$count;
+						push @result, [ $count, $n, $start_a, $end_a, $start_b, $end_b, int ( $insert - $stat[0] ), $stat[1] ] ;
+					}
+				}
+			} # filter for translocation signatures
+			elsif ( $cluster_type[4] eq "trans"){
+			    ++$count_trans;
+			    if($end_a-$start_a <= $insert + $insert_shift && $end_b-$start_b <= $insert + $insert_shift ){
+				++$count;
+				push @result, [ $count, $n, $start_a, $end_a, $start_b, $end_b ] ;}
+			    else{
+#				print "TRANS cluster discarded: acceptor size ", $end_a-$start_a, "donor size: ", $end_b-$start_b, ", expected a maximum of ", $insert + $insert_shift , ".\n"
+			    }
+			} # filter for inversion signatures
+			elsif ( $cluster_type[4] eq "inv"  && $end_a-$start_a <= $insert + $insert_shift && $end_b-$start_b <= $insert + $insert_shift &&  $end_a < $start_b ){
+				++$count;
+				push @result, [ $count, $n, $start_a, $end_a, $start_b, $end_b ] ;
+			}									
+		}
+	}
+#	print "In total $count_trans TRANS clusters have been treated.\n";
+	# print results
+	open ( OUT , ">$file.merged" ) || die "Cannot open $file.merged, $!\n";
+	for my $i ( 0 .. $#result){
+		print OUT join ("\t", @{$result[$i]}),"\n";
+	}
+	close ( OUT );
+}
+#########################################################################################
+#				get_clusters
+#----------------------------------------------------------------------------------------
+# take a file
+# return a hash containing the cluster
+sub get_clusters {
+	my ( $file ) = @_;
+	my @clusters;
+	open ( IN , $file ) || die "[error]: Cannot open $file, $!\n";
+	while ( <IN> ){
+		chomp;
+		my @data = split '\t', $_;
+		push @clusters , [ @data ] ; 
+	}
+	close ( IN );
+#	print "Read ", $#clusters, " clusters from file ", $file, ".\n";
+	return @clusters;
+}
+###################################################################################
+#			get_coordonate_stat 					  #
+#----------------------------------------------------------------------------------
+# take: an array of x y 
+# return: mean and standard deviation of the (y-x) values
+sub get_coordonate_stat{
+	my ( $coord ) = @_;
+	$coord =~s/^\((.+)\)$/$1/;
+	my @data = split '\)\(', $coord;
+	my $mean = fragment_size_mean ( \@data );
+	my $sum = 0;
+	foreach ( @data ){
+		my @xy = split '\,' , $_;
+		$sum += ( $xy[1] - $xy[0] - $mean ) * ( $xy[1] - $xy[0] - $mean );
+	}
+	return ( $mean , sqrt ( $sum / @data ) );
+}
+###################################################################################
+#			fragment_size_mean					  #
+#----------------------------------------------------------------------------------
+# take: an array of x y
+# return: the mean of the (y-x)
+sub fragment_size_mean {
+	my ( $values ) = @_;
+	my $sum = 0;
+	foreach  ( @$values ){
+		my @xy = split '\,' , $_;
+		$sum += $xy[1] - $xy[0];
+	}
+	return $sum / ( $#{@$values} + 1 );
+}
+
+
+##############################################################################################
+#			sv_calling
+#---------------------------------------------------------------------------------------------
+# 
+#
+sub sv_calling {
+	my ( $in , $cov , $reads , $interval , $lim_inf ) = @_;
+	print("Calling structural variants...\n");
+
+	# interchromosomal translocation calling
+	my %CLUSTERS_TRANS = get_clusters_data ( $in , "trans" );
+	print(scalar(keys(%CLUSTERS_TRANS)), " translocation events called.\n");
+	interchromo ( \%CLUSTERS_TRANS , $reads , $interval , $cov, $lim_inf );
+
+	# intrachromosomal translocation calling (sens)
+	my %CLUSTERS_DEL = get_clusters_data ( $in , "del" );
+	print(scalar(keys(%CLUSTERS_DEL)), " deletion events called.\n");
+
+	my %CLUSTERS_DUP = get_clusters_data ( $in , "dup" );
+	print(scalar(keys(%CLUSTERS_DUP)), " duplication events called.\n");
+
+	intrachromo ( \%CLUSTERS_DEL , \%CLUSTERS_DUP , $reads , $interval , $cov , "sens" , $lim_inf );
+
+	# intrachromosomal translocation-inversion calling 
+	my %CLUSTERS_MINUS_INV = get_clusters_data ( $in , '\-\.inv' );
+	my %CLUSTERS_PLUS_INV = get_clusters_data ( $in , '\+\.inv' );
+	intrachromo ( \%CLUSTERS_MINUS_INV , \%CLUSTERS_PLUS_INV , $reads , $interval , $cov , "inverse" , $lim_inf );
+
+        #removing previous runs if they exist
+	`rm $OUTPUT_DIR/sv.*` if (-e "$OUTPUT_DIR/sv.*");
+
+	# sortint and selection of SV
+	sort_select (\@TRANS,"TRANS") if $#TRANS>0 ;
+	sort_select (\@DEL,"DEL") if $#DEL>0;
+
+        #Remove eyecandy columns from SV file
+	`cp $OUTPUT_DIR/sv.out $OUTPUT_DIR/sv.formatted`;
+	`cut -f3- $OUTPUT_DIR/sv.out > $OUTPUT_DIR/tmp`;
+	`mv $OUTPUT_DIR/tmp $OUTPUT_DIR/sv.out`;
+}
+#############################################################################################
+#			sort_select
+#--------------------------------------------------------------------------------------------
+#
+#
+sub sort_select{
+    my ( $called , $type ) = @_;
+    my @sorted_trans = sort { $a->[0] cmp $b->[0] || $a->[1] <=> $b->[1] } @$called;
+    my @donor = @{$sorted_trans[0]} ;
+    my @donor_for_analysis;
+    my $isnear=0;
+    my $count =1;
+    my @lines;
+    open (OUT , ">>:utf8", "$OUTPUT_DIR/sv.out") || die "Cannot open $OUTPUT_DIR/sv.out, $!,\n";
+    foreach my $i ( 1 .. $#sorted_trans ){
+	if ( $donor[0] eq $sorted_trans[$i]->[0] ){
+	    my @overlap = is_overlapping ( $donor[1], $donor[2] , $sorted_trans[$i]->[1] , $sorted_trans[$i]->[2] , 0 );
+	    if ($donor[9] eq "" || $sorted_trans[$i]->[9] eq "") {
+		print "Problem with donor ";
+		foreach my $j (1..$#donor) {
+		    print $donor[$j], "-";
+		}
+		print "\n and acceptor: ";
+		foreach my $j (1..$#{@{$sorted_trans[$i]}}){
+		    print $sorted_trans[$i]->[$j], "-";
+		}
+		print "\n";
+		next;
+ 	    }
+	    if  ( $overlap[0] > 0 && ( ( $donor[10] / $donor[9]) < ( $sorted_trans[$i]->[10] / $sorted_trans[$i]->[9])) ){
+		if($isnear==1){
+		    # a similar donor already exists
+#		print OUT "\x{251C}", "\t", $count, "\t", $type, "\t" , join ( "\t" , @donor ) , "\n" if ( test_overcov ( \@donor , \%OVER_COV ) == 0 );
+		push (@lines, join("", ("\x{251C}", "\t", $count, "\t", $type, "\t" , join ( "\t" , @donor)), "\t", "$donor[4]:$donor[5]-$donor[6]")) if ( test_overcov ( \@donor , \%OVER_COV ) == 0 );
+		push(@donor_for_analysis, "$donor[4]:$donor[5]-$donor[6]");
+		}
+		else{
+		    # first such donor
+		push (@lines, join("", ("\x{256D}", "\t", $count, "\t", $type, "\t" , join ( "\t" , @donor)), "\t", "$donor[4]:$donor[5]-$donor[6]")) if ( test_overcov ( \@donor , \%OVER_COV ) == 0 );
+#		print OUT "\x{256D}", "\t", $count, "\t", $type, "\t" , join ( "\t" , @donor ) , "\n" if ( test_overcov ( \@donor , \%OVER_COV ) == 0 );
+		$isnear=1;
+		}
+		push(@donor_for_analysis, "$donor[4]:$donor[5]-$donor[6]");
+		@donor = @{$sorted_trans[$i]};
+		#print $type ,"\t" , join ( "\t" , @donor ) , "\n";				
+	    }
+	    elsif  ( $overlap[0] == 0 ){
+		if($isnear==1){
+		    push (@lines, join("", ("\x{2570}", "\t", $count, "\t", $type, "\t" , join ( "\t" , @donor)), "\t", "$donor[4]:$donor[5]-$donor[6]")) if ( test_overcov ( \@donor , \%OVER_COV ) == 0 );
+#		    print OUT "\x{2570}", "\t", $count, "\t", $type ,"\t" , join ( "\t" , @donor ) , "\n" if ( test_overcov ( \@donor , \%OVER_COV ) == 0 );
+		    push(@donor_for_analysis, "$donor[4]:$donor[5]-$donor[6]");
+		    my %counted_donors=discriminate_donor($DISCORDANT, @donor_for_analysis);
+		    foreach my $line (@lines){
+			my @tab=split("\t", $line);
+		    foreach my $key (keys(%counted_donors)){
+			my $value=$counted_donors{$key};
+			    if($tab[$#tab] eq $key){
+				$tab[$#tab]=$value;
+				print "Donor $key scored $value reads.\n";
+				print OUT join "\t", @tab, "\n";
+			    }
+			}
+		    }
+		    @lines=();
+		    $isnear=0;
+		}
+		else{
+		    print OUT " ", "\t", $count, "\t", $type ,"\t" , join ( "\t" , @donor ) , "\t*\n" if ( test_overcov ( \@donor , \%OVER_COV ) == 0 );
+		}
+		++$count;
+		@donor = @{$sorted_trans[$i]};
+	    }
+	}
+	else {
+	    if($isnear==1){
+		push (@lines, join("", ("\x{2570}", "\t", $count, "\t", $type, "\t" , join ( "\t" , @donor)), "\t", "$donor[4]:$donor[5]-$donor[6]")) if ( test_overcov ( \@donor , \%OVER_COV ) == 0 );
+#		    print OUT "\x{2570}", "\t", $count, "\t", $type ,"\t" , join ( "\t" , @donor ) , "\n" if ( test_overcov ( \@donor , \%OVER_COV ) == 0 );
+		push(@donor_for_analysis, "$donor[4]:$donor[5]-$donor[6]");
+		my %counted_donors=discriminate_donor($BAM, @donor_for_analysis);
+		foreach my $line (@lines){
+		    my @tab=split("\t", $line);
+		    foreach my $key (keys(%counted_donors)){
+			my $value=$counted_donors{$key};
+			if($tab[$#tab] eq $key){
+			    $tab[$#tab]=$value;
+			    print "Donor $key scored $value reads.\n";
+			    print OUT join "\t", @tab, "\n";
+			}
+		    }
+		}
+		@lines=();
+		$isnear=0;
+	    }
+	    else{
+		print OUT "", "\t", $count, "\t", $type ,"\t" , join ( "\t" , @donor ) , "\t*\n" if ( test_overcov ( \@donor , \%OVER_COV ) == 0 );
+	    }
+	    $count++;
+	    @donor = @{$sorted_trans[$i]};
+	}
+    } 
+    close(OUT);
+}
+#########################################################################################
+#				get_clusters_data
+#----------------------------------------------------------------------------------------
+# take: a directory
+# return: a hash containing the clusters data
+sub get_clusters_data {
+	my ( $dir , $type ) = @_;
+	my %clusters;
+	opendir ( my $open_dir , $dir ) || die "Cannot open $dir, $!\n";
+	my @files = readdir ( $open_dir );
+	foreach my $file ( @files ){
+		if ( $file=~/.+\.$type\.init\.clustered\.merged$/ ){
+			open ( IN , "$dir/$file" )||die"Cannot open $dir/$file,$!\n";
+			while ( <IN> ){
+				chomp;
+				my @data = split '\t', $_;
+				push @{$clusters{$file}} , [ @data ] ; 
+			}
+			close (IN);
+		}
+	}
+	close ( $open_dir );
+	return %clusters;
+}
+###################################################################################
+#			interchromo
+#----------------------------------------------------------------------------------
+# take: a clusters data with interchromosomal signature
+# return: interchromosomal translocation
+sub interchromo {
+	my ( $clusters, $reads_l , $maxint , $min_cov , $lim_inf) = @_;
+	my %clusters = %$clusters;
+	my @analysed_clusters;
+	my $comp = 0;
+	my @trans;
+
+	# get all interchromosomal insertion                                     # En entrée, %clusters indice un tableau de clusters par le fichier 
+	foreach my $clust (keys %clusters){                                      # dans lequel ils apparaissent. Pour chaque fichier, on boucle sur les autres
+		my @cluster_type = split '\.', $clust;                           # (cluster_type et new_cluster_type) et on appelle call_interc_insert, 
+		foreach my $new_clust (keys %clusters){	                         # une translocation est possible.
+			my @new_cluster_type = split '\.', $new_clust; 
+			if ( avoid_duplication ( $clust , $new_clust , \@analysed_clusters ) == 0 ){
+				push ( @{$analysed_clusters[$comp]}, $clust, $new_clust );
+				++$comp;
+				my $sens = is_insertion_possible ( \@cluster_type , \@new_cluster_type );
+				call_interchromosomal_insertion ( $clusters{$clust} , $clusters{$new_clust} , \@cluster_type , \@new_cluster_type ,  $reads_l , $maxint , $sens , $min_cov, $lim_inf ) if ( $sens ne "no" );
+			}
+		}	
+	}	
+}
+
+######################################################################################
+#			call_interchromosomal_insertion
+#-------------------------------------------------------------------------------------
+#
+#
+sub call_interchromosomal_insertion {
+	my ( $cluster_data , $new_cluster_data , $cluster_type , $new_cluster_type, $reads_length , $maximal_size_shift , $sens , $min_cov, $lim_inf ) = @_;
+	for my $i ( 0 .. $#{$cluster_data} ){
+		for my $j ( 0..$#{$new_cluster_data} ){		
+			my @insertion = get_insertion ( $cluster_data->[$i] , $new_cluster_data->[$j] , $cluster_type, $new_cluster_type , $sens , $reads_length , $maximal_size_shift );	
+			if ( $#insertion > 0 && $insertion[10] >= $insertion[9] * $min_cov / $reads_length ){
+				if ( $insertion[9] < $lim_inf ){
+                                        if ( $insertion[8]/$insertion[9] > 0.8 ){
+                                                push @TRANS, [@insertion] ;
+                                        }
+                                }
+                                elsif($insertion[2]-$insertion[1]<1000){
+                                        push @TRANS, [@insertion] ;
+                                }
+			}
+		}
+	}
+}
+
+
+##################################################################################
+#				avoid_duplication
+#----------------------------------------------------------------------------------
+# take 2 cluster names and an array of cluster name
+# return 1 if clusters are the same or if the comparison has already been done
+sub avoid_duplication {
+	my ($clust, $new_clust, $analysed_clusters) = @_;
+	my $done = 0;
+	if ($clust eq $new_clust){
+		$done = 1;
+	}
+	elsif ($#{@$analysed_clusters} > 0){
+		for my $analysed_cluster (0..$#{@$analysed_clusters}){
+			if ( ( ($clust eq $analysed_clusters->[$analysed_cluster]->[0] ) && ($new_clust eq $analysed_clusters->[$analysed_cluster]->[1] ) ) || ( ( $clust eq $analysed_clusters->[$analysed_cluster]->[1] ) && ( $new_clust eq $analysed_clusters->[$analysed_cluster]->[0] ) ) ){
+				$done = 1;
+			}
+		}
+	}
+	return $done;				
+}
+
+###################################################################################
+#			intrachromo
+#----------------------------------------------------------------------------------
+# take: a clusters data with intrachromosomal signature
+# return: intrachromosomal translocation
+sub intrachromo {
+	my ( $clusters_a , $clusters_b , $reads_l , $maxint , $min_cov , $sens , $lim_inf ) = @_;
+	my %clusters_a = %$clusters_a;
+	my %clusters_b = %$clusters_b;
+	my $comp = 0;
+	foreach my $clust ( keys %clusters_a ){
+		my @cluster_type = split '\.', $clust;
+		foreach my $new_clust (keys %clusters_b){	
+			my @new_cluster_type = split '\.', $new_clust;
+			if ( $cluster_type[0] eq $new_cluster_type[0] ){
+				call_intrachromosomal_insertion ( $clusters_a{$clust} , $clusters_b{$new_clust} , \@cluster_type , \@new_cluster_type ,$reads_l , $maxint , $sens , $min_cov , $lim_inf  );
+			}
+		}
+	}	
+}
+
+######################################################################################
+#			call_intrachromosomal_insertion
+#-------------------------------------------------------------------------------------
+# take: data of a deletion and duplication clusters on the same chromosome
+# return: intrachromosomal translocation and true deletion
+sub call_intrachromosomal_insertion {
+	my ( $cluster_data , $new_cluster_data,  $cluster_type , $new_cluster_type, $reads_length , $maximal_size_shift , $sens , $min_cov , $lim_inf ) = @_;
+	for my $i ( 0 .. $#{$cluster_data} ){
+		my $is_linked = 0;
+		for my $j ( 0..$#{$new_cluster_data} ){
+			my @insertion = get_insertion ( $cluster_data->[$i] , $new_cluster_data->[$j] , $cluster_type, $new_cluster_type , $sens , $reads_length , $maximal_size_shift );	
+			if ( $#insertion > 0  && $insertion[10] > ($insertion[9] * $min_cov / $reads_length) && abs ( $insertion[2]-$insertion[5] )> 50000 ){
+				if ( $insertion[9] < $lim_inf ){
+					if ( $insertion[8]/$insertion[9] > 0.8 ){
+						push @TRANS, [@insertion] ;
+						$is_linked = 1;
+					}
+				}
+				elsif($insertion[2]-$insertion[1]<1000){
+					push @TRANS, [@insertion] ;
+					$is_linked = 1;
+				}
+			}
+		}
+		call_deletion ( $cluster_data->[$i] , $cluster_type , $lim_inf , $min_cov , $reads_length ) if ( $is_linked == 0 );		
+	}
+}
+
+########################################################################################
+#				call_deletion
+#--------------------------------------------------------------------------------------
+#
+#
+sub call_deletion {
+	my ( $cluster_data , $cluster_type , $min_cluster_size , $min_cov , $reads_length  ) = @_;
+	if ( $cluster_type->[4] eq "del" && $cluster_data->[3]-$cluster_data->[2] > $min_cluster_size && $cluster_data->[5]-$cluster_data->[4] > $min_cluster_size && $cluster_data->[1]>$min_cluster_size*$min_cov/$reads_length){
+		push @DEL , [$cluster_type->[0] , @$cluster_data[2..3] ,"","","","","","","", $cluster_data->[1] ] ;
+	} 
+}
+##################################################################################
+#				get_insertion
+#----------------------------------------------------------------------------------
+# take 2 arrays of cluster data and their cluster name, the hypothetical sens of insertion, and the read length 
+# return an array with insertion features
+sub get_insertion {
+	my ( $clust_data , $new_clust_data , $clust_type , $new_clust_type , $sens , $reads_l , $maxint ) = @_;
+	my @result;
+	my @border;
+	# Check if the two left clusters are overlapping
+	my @ll_overlap = is_overlapping ( $clust_data->[2] , $clust_data->[3] , $new_clust_data->[2] , $new_clust_data->[3] , 0 );	
+	if ( $ll_overlap[0] > 100 ){
+		@border = getBorders ( $clust_type->[3], $new_clust_type->[3], $clust_data->[4], $clust_data->[5], $new_clust_data->[4], $new_clust_data->[5], $reads_l);
+		if ( ( $border[1] - $border[0] >= 0 )  && ( ( $border[1] - $border[0]) < $maxint ) ){
+			push (@result, $clust_type->[2], $border[0], $border[1], $border[1] - $border[0], $clust_type->[0], $ll_overlap[2], $ll_overlap[3], $sens, $ll_overlap[0], $ll_overlap[1], $clust_data->[1] + $new_clust_data->[1] ); 
+		}
+	}
+	# Check if the two right clusters are overlapping
+	my @rr_overlap = is_overlapping ( $clust_data->[4], $clust_data->[5], $new_clust_data->[4], $new_clust_data->[5], 0 );
+	if ( $rr_overlap[0] > 100 ){
+		@border = getBorders ( $clust_type->[1], $new_clust_type->[1], $clust_data->[2], $clust_data->[3], $new_clust_data->[2], $new_clust_data->[3], $reads_l );
+		if ( ( $border[1] - $border[0] >= 0 ) && ( ($border[1] - $border[0]) < $maxint ) ){
+			push ( @result, $clust_type->[0], $border[0], $border[1] , $border[1] - $border[0], $clust_type->[2], $rr_overlap[2], $rr_overlap[3], $sens, $rr_overlap[0], $rr_overlap[1],$clust_data->[1] + $new_clust_data->[1] );
+		}
+	}
+	return @result
+}
+###################################################################################
+#				is_insertion_possible
+#----------------------------------------------------------------------------------
+# get two preclusters name
+# return true if the overlapping is possible (from chromosome and orientation of the clusters)
+sub is_insertion_possible {
+	my ( $clust, $new_clust ) = @_;
+	if ( ( $clust->[0] eq $new_clust->[0]) && ($clust->[2] eq $new_clust->[2] ) ){
+		if ( ( $clust->[1] eq $clust->[3]) && ($new_clust->[1] eq $new_clust->[3] ) ){
+			return "inverse";
+		}
+		elsif ( ( $clust->[1] ne $clust->[3]) && ($new_clust->[1] ne $new_clust->[3] ) ){
+			return "sens";
+		}
+		else{
+			return "no";
+		}
+	}
+	else{
+		return "no";
+	}	
+}
+
+###################################################################################
+#			is_overlapping						  #
+#----------------------------------------------------------------------------------
+# take: an array of monotonously increasing integers (a b c d), see if interval [a:b] and [c:d] are overlapping
+# return: an array (intersection_size, union_size, union_min, union_max)
+sub is_overlapping{
+	use List::Util qw(max min);
+	my ( $start_a , $end_a , $start_b , $end_b , $reads_l ) = @_;
+	my $overlap_start = ($start_a > $start_b) ? $start_a : $start_b;
+    	my $overlap_end = ($end_a < $end_b) ? $end_a + $reads_l : $end_b + $reads_l;
+    	my $overlap_size = ($overlap_start > $overlap_end) ? 0 : $overlap_end - $overlap_start;	
+	my $min = min ( $start_a , $end_a + $reads_l , $start_b, $end_b + $reads_l ) ;
+	my $max = max ( $start_a , $end_a + $reads_l , $start_b, $end_b + $reads_l ) ; 
+	return ( $overlap_size , $max-$min , $min , $max );
+}
+###################################################################################
+#				getBorders					  #
+#----------------------------------------------------------------------------------
+# get two intervals position
+# return insertion border
+sub getBorders {
+	my ( $sens_a, $sens_b, $start_a, $end_a, $start_b, $end_b, $reads_l ) = @_; 
+	my $left_border;
+	my $right_border;
+	if ( ( $sens_a eq "+" ) && ( $sens_b eq "-" ) ){
+		$right_border = $start_a;
+		$left_border = $end_b - $reads_l;
+	}
+	elsif( ( $sens_a eq "-" ) && ( $sens_b eq "+" ) ){
+		$right_border = $start_b;
+		$left_border = $end_a - $reads_l;
+	}
+	my @border = ( $left_border , $right_border );
+	return @border;
+}
+#
+#-------------------------------------------------------------------------------------
+#
+#
+sub test_overcov {
+	my ( $var , $overcov ) = @_;
+	my $donor_is_over = 0;
+	my $acceptor_is_over = 0;
+	foreach my $over_region (@{$overcov->{$var->[0]}}){
+		my @overlap = is_overlapping ($over_region->[0],$over_region->[1],$var->[1],$var->[2],0);
+		if ( $overlap[0] > 0 ){
+			$acceptor_is_over = 1;
+			last;
+		}
+	}
+	foreach my $over_region (@{$overcov->{$var->[4]}}){
+		my @overlap = is_overlapping ( $over_region->[0], $over_region->[1], $var->[5],$var->[6],0 );
+		if ( $overlap[0] > 0 ){
+			#print $over_region->[0],"\t", $over_region->[1],"\t", $var->[5],"\t",$var->[6],"\n";
+			$donor_is_over = 1;
+			last;
+		}
+	}
+	return 1 if ( $acceptor_is_over == 1 && $donor_is_over == 1 );
+	return 0;
+}
+#
+#
+#
+#
+
+
+sub usage {
+	my $warn = "
+				svfinder
+			JM Aury, AL Gilly, MA Madoui, Genoscope, 2012
+
+svfinder -bam myfile.bam -out my_output_directory -reference fasta_reference_genome [-options...]
+
+options:
+
+	-lib		             the type of library, Mate Pair (\"MP\") or Pair-end (\"PE\") (MP)
+	-maxcov		             maximum of coverage to avoid low complexity region (1000)
+	-read		             size of reads in bp (76)
+	-samtools	             samtools program full path (samtools)
+	-dm		             number of MAD to use to get coverage limit (4)
+	-sm		             number of MAD to use to get insert size limit (4)
+	-sample		             number of sam record to sample for coverage and insert size estimation (1000000)
+	-slc		             full path to the single linkage clustering program (slc)
+	-minreads	             minimum number of reads in a cluster (10)
+        -nosort [FILE]               do not sort alignment according to names internally, use FILE instead (disabled)
+        -noluther                    do not rewrite BAM information in SNP discovery (disabled)
+        -m [READS]                   minimum coverage for SNP detection (255)
+        -clustering_parameters [X:Y] force clustering parameters to X, Y (disabled)
+        -mode [i]                    Bitmask. 1 for SNP detection, 2 for SV (3)
+        -annotate                    Perform intersection with TE annotation after SV have been called (disabled)
+        -picard                      full path to Picard Tools ('')
+
+";
+	warn $warn;
+	exit (1);
+}				
+				
+=head1 NOM
+
+SVfinder - an application for Structural Variations detection from short reads sequencing
+
+=head1 SYNOPSIS
+
+	svfinder -bam myfile.bam -out output_dir [-options...] 
+
+=head1 DESCRIPTION
+
+SVfinder was developed to detect large structural variations from short reads sequencing. It takes a BAM file input and return a list of structural variations. SVfinder is adapted for mate-pair sequencing and allows the detection of intra and interchromosomal translocation.
+
+=head2 Options
+
+=over 4
+
+=item maxcov
+
+=item samtools
+
+=item slc
+
+=item dm
+
+=item sm
+
+=item minreads
+
+
+
+=back
+
+=head1 AUTEUR
+
+Mohammed-Amin Madoui, Jean-Marc Aury, Genoscope, 2011
+
+=cut
+
+

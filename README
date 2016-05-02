@@ -1,0 +1,24 @@
+Welcome to TE-Tracker, a program dedicated to the de-novo discovery of transposition events.
+
+For installation, please use the command
+
+./install.pl
+
+This will install a standalone version of TE-Tracker in the current directory, downloading all necessary tools and setting the path for them.
+The three modules (eris.pl, leto.pl, metis.pl) need to be called sequentially to prepare the BAMs and call transposition events.
+You can call the three modules directly but it is recommended to use the tetracker executable (tetracker eris, tetracker leto, tetracker metis).
+
+Manual.pdf contains a quick-start guide that will allow the user to rapidly generate datasets comparable to those presented in the original article.
+
+Once TE-Tracker is installed, the 'man' subcommand will open a manual for each of the programs (tetracker man, tetracker eris man, etc.).
+
+
+TROUBLESHOOTING
+===============
+
+
+TE-Tracker has not been extensively tested on a different environment than the one it was written in. We cannot guarantee that all errors are described here.
+If you experience any errors not reported below, please contact ag15@sanger.ac.uk.
+
+- After installation, you might get a "permission denied" error when executing TE-Tracker. This was found to occur when perl is installed in a non-standard location. Please make sure that /usr/bin/perl exists, or replace the shebang line (#!) in tetracker, eris.pl, leto.pl, metis.pl, by the path to your perl executable.
+- A "Could not create the Java virtual machine" can be thrown by Java. Please make sure that the path to a working java executable is in your PATH and that Java is correctly configured on your machine.

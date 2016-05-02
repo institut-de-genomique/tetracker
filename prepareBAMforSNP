@@ -1,0 +1,39 @@
+#!/bin/bash
+
+
+dir=$1
+bam=$2
+echo $dir;
+
+gatkDir="/env/cns/src/gatk/GenomeAnalysisTK-2.4-7-g5e89f01/"
+#AKLRef="/env/cns/proj/projet_AKL/Reference/Ref_13-06-14/reference.fasta"
+AKLRef="/env/cns/proj/projet_AKL/db/test/Arabidopsis_thaliana.fa"
+
+samtools view -h $dir/$bam | awk '/^@/ || and($2, 4)!=4' | egrep "^@|X0:i:1" | samtools view -bS - > $dir/uniqHit.bam
+
+q java -jar /env/cns/src/picard/picard-tools-1.89/AddOrReplaceReadGroups.jar INPUT=$dir/uniqHit.bam O=$dir/uniqHit.rg.bam RGLB=AKL RGPL=Illumina RGPU=Barcode RGSM=$dir
+
+samtools index $dir/uniqHit.rg.bam
+
+rm $dir/uniqHit.bam
+
+#q "java -Xmx4g -jar /env/cns/src/gatk/GenomeAnalysisTK-2.2-9-g54ae978/GenomeAnalysisTK.jar -T RealignerTargetCreator -R /env/cns/proj/projet_AKL/db/test/Arabidopsis_thaliana.fa -I $dir/uniqHit.rg.bam -o $dir/RealignerTarget.intervals --windowSize 100"
+q "java -Xmx4g -jar $gatkDir/GenomeAnalysisTK.jar -T RealignerTargetCreator -R $AKLRef -I $dir/uniqHit.rg.bam -o $dir/RealignerTarget.intervals --windowSize 100"
+
+
+#q "java -Xmx4g -jar /env/cns/src/gatk/GenomeAnalysisTK-2.2-9-g54ae978/GenomeAnalysisTK.jar -T IndelRealigner -R /env/cns/proj/projet_AKL/db/test/Arabidopsis_thaliana.fa -I $dir/uniqHit.rg.bam -targetIntervals $dir/RealignerTarget.intervals -o $dir/Realigned.bam -maxIsize 7000 -greedy 200"
+q "java -Xmx4g -jar $gatkDir/GenomeAnalysisTK.jar -T IndelRealigner -R $AKLRef -I $dir/uniqHit.rg.bam -targetIntervals $dir/RealignerTarget.intervals -o $dir/Realigned.bam -maxIsize 7000 -greedy 200"
+
+
+rm $dir/uniqHit.rg.bam
+
+#q "java -jar ~/GenomeAnalysisTK-2.5-2-gf57256b/GenomeAnalysisTK.jar -R /env/cns/proj/projet_AKL/db/test/Arabidopsis_thaliana.fa -T BaseRecalibrator -I $dir/Realigned.bam -knownSites:name,bed ~/same.vcf -o $dir/recal.scores.grp"
+q "java -jar $gatkDir/GenomeAnalysisTK.jar -R $AKLRef -T BaseRecalibrator -I $dir/Realigned.bam -knownSites:name,bed /env/cns/proj/projet_AKL/code/trunk/same.vcf -o $dir/recal.scores.grp"
+
+#q "java -jar ~/GenomeAnalysisTK-2.5-2-gf57256b/GenomeAnalysisTK.jar -R /env/cns/proj/projet_AKL/db/test/Arabidopsis_thaliana.fa -T  PrintReads -I $dir/Realigned.bam -BQSR $dir/recal.scores.grp -o $dir/Realigned.Recal.bam"
+q "java -jar $gatkDir/GenomeAnalysisTK.jar -R $AKLRef -T  PrintReads -I $dir/Realigned.bam -BQSR $dir/recal.scores.grp -o $dir/Realigned.Recal.bam"
+
+rm $dir/Realigned.bam
+
+#q "java -Xmx7g -jar /env/cns/src/gatk/GenomeAnalysisTK-2.4-7-g5e89f01/GenomeAnalysisTK.jar -R /env/cns/proj/projet_AKL/db/test/Arabidopsis_thaliana.fa -T ReduceReads -I $dir/Realigned.Recal.bam -o $dir/Realigned.Reduced.bam"
+q "java -Xmx7g -jar $gatkDir/GenomeAnalysisTK.jar -R $AKLRef -T ReduceReads -I $dir/Realigned.Recal.bam -o $dir/Realigned.Reduced.bam"

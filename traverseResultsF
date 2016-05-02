@@ -1,0 +1,402 @@
+#!/usr/bin/perl -w
+use List::Util qw(first max maxstr min minstr reduce shuffle sum);
+
+$|=1;
+# Fetch all results from the grid
+my @files=`find -iname sv.formatted | grep "\/auto\/[0-9]" | grep -v "50-"`;
+my %linenr;
+foreach my $item (@files){
+    chomp($item);
+    open(TMP, $item);
+    my @array = <TMP>;
+    @array= grep /TRANS/, @array;
+    close(TMP);
+    @array=grep !/^(\s+)$/, @array;
+    my @tmp=split("\t", $array[$#array]);
+    $item =~ /\/(\d+)-(\d+)\//;
+    $linenr{"$1-$2"}=$tmp[1];
+#    print "$tmp[1]er found in $1-$2.\n" if($tmp[1]<=80);
+#    print $linenr{"$1-$2"}, " insertions for point $1-$2.\n";
+}
+
+
+
+# Compute the maximum
+use List::Util qw(max first);
+my $maximum=max(values %linenr);
+my $coordmax;
+foreach my $coord (keys %linenr){
+#    print "$coord\n";
+     $coordmax=$coord if($linenr{$coord} == $maximum);
+}
+
+#print "Maximum found at $coordmax.\n";
+# Filter, get all individual TE annotations and build a hash ANNOT:pos{[acc1, acc2]}
+open (TMP, first {$_ =~ /$coordmax/} @files ) or die "problem opening file.\n";
+my %reshash;
+while (<TMP>){
+    next if ($_=~/^(\s*)$/);
+    next if ($_=~/DEL/);
+    chomp;
+    my @line=split "\t", $_;
+    my $donor="$line[7]:$line[8]-$line[9]";
+    my $clef=$donor;
+    my $added=0;
+    if(!defined($reshash{$clef})){
+	# le même donneur n'existe pas, il faut vérifier l'overlap
+#	print ("Checking the presence of $clef\n");
+	for my $key(keys %reshash){
+#	    print("versus $key\n");
+	    my $coords=$key;
+	    my $chr=(split(":", $coords))[0];
+	    my $tmp=(split(":", $coords))[1];
+	    my $start=(split("-", $tmp))[0];
+	    my $stop=(split("-", $tmp))[1];
+#	    print "start=$start, stop=$stop, line8=$line[8], line9=$line[9]\n";
+	    my @intervals=sort {$a <=> $b} ($start, $stop, $line[8], $line[9]);
+	    if($chr eq $line[7] && (($intervals[0]==$start && $intervals[1]==$line[8]) || ($intervals[0]==$line[8] && $intervals[1]==$start)) ){
+		#the overlap is non null!
+#		print "Donor $coords overlaps with current donor $line[4]:$line[5]-$line[6].";
+		my $val=$reshash{$key};
+#		print "\nOld key: $key \t Old value:", join(",", @{$val}), "\n";
+		delete($reshash{$key});
+		push(@{$val}, join("@", "$line[3]:$line[4]..$line[5]", $line[13], $line[11], $line[10], $line[7], $line[8], $line[9]));
+		my $newkey=$chr.":".$intervals[0]."-".$intervals[$#intervals];
+		$reshash{$newkey}=$val;
+#		print "New key: $newkey \t New value:", join(",", @{$val}), "\n";
+		$added=1;
+		last;
+	    }
+	}
+	push(@{$reshash{$clef}}, join("@", "$line[3]:$line[4]..$line[5]", $line[13], $line[11], $line[10], $line[7], $line[8], $line[9] )) if($added==0);
+    }else{
+	# par un extrême hasard, le même donneur existe déjà dans la table
+	push(@{$reshash{$clef}}, join("@", "$line[3]:$line[4]..$line[5]", $line[13], $line[11], $line[10], $line[7], $line[8], $line[9]));
+    }
+}
+close(TMP);
+%reshash=purifyHash(%reshash);
+#print "Primary exploration done. Hash contains ",scalar(keys %reshash)," donors\n";
+#printHash(%reshash);
+
+# exit;
+# For each file
+my $i=0;
+foreach my $file(@files){
+    $i++;
+#    print "Treated $i of ", $#files+1, " files, hash contains ",scalar(values(%reshash)) ," values in ",scalar(keys(%reshash)) ,"keys.\r";
+#    print "$file\n";
+    open(CURFILE, "cat $file | grep TRANS |");
+    while(<CURFILE>){
+# For each line, repeat same procedure as before, except there is a similar replacement procedure for acceptor
+    next if ($_=~/^(\s*)$/);
+    chomp;
+    my $in=$_;
+    my @line=split "\t", $in;
+    my $donor="$line[7]:$line[8]-$line[9]";
+    my $clef=$donor;
+    my $added=0;
+#    print "Considering line $in\n" if ($line[4] =~/^172/);
+    if(!defined($reshash{$clef})){
+	# le même donneur n'existe pas, il faut vérifier l'overlap
+	#print ("Checking the presence of $clef\n");
+	for my $key(keys %reshash){
+	    #print("versus $key\n");
+	    my $coords=$key;
+	    my $chr=(split(":", $coords))[0];
+	    my $tmp=(split(":", $coords))[1];
+	    my $start=(split("-", $tmp))[0];
+	    my $stop=(split("-", $tmp))[1];
+	    my @intervals=sort {$a <=> $b} ($start, $stop, $line[8], $line[9]);
+#	    print "We are at 0, added=$added\n" if ($line[4] =~/^172/);
+	    if($chr eq $line[7] && (($intervals[0]==$start && $intervals[1]==$line[8]) || ($intervals[0]==$line[8] && $intervals[1]==$start)) ){
+#		print "We are at 1b\n" if ($line[4] =~/^172/);
+
+		if($line[9]-$line[8]>$stop-$start){
+#		    print "We are at 1\n" if ($line[4] =~/^172/);
+		#the overlap is non null!
+		#print "Donor $coords overlaps with current donor $line[4]:$line[5]-$line[6].";
+		my $val=$reshash{$key};
+#		print "\n<--------Old key: $key \t Old value:", join(",", @{$val}), "\n";
+		delete($reshash{$key});
+
+		my $newkey=$chr.":".$intervals[0]."-".$intervals[$#intervals];
+		$reshash{$newkey}=$val;
+		push(@{$reshash{$newkey}}, join("@", "$line[3]:$line[4]..$line[5]", $line[13], $line[11], $line[10], $line[7], $line[8], $line[9]));
+#		print "New key: $newkey \t New value:", join(",", @{$val}), "\n---->\n";
+		}else{
+		    push(@{$reshash{$key}}, join("@", "$line[3]:$line[4]..$line[5]", $line[13], $line[11], $line[10], $line[7], $line[8], $line[9]));
+		}
+		$added=1;
+		last;
+	    }
+	}
+	if($added==0){
+#		    print "We are at 2\n" if ($line[4] =~/^172/);
+
+	    push(@{$reshash{$clef}}, join("@", ("$line[3]:$line[4]..$line[5]", $line[13], $line[11], $line[10], $line[7], $line[8], $line[9])));
+	}
+    }else{
+#		    print "We are at 3\n" if ($line[4] =~/^172/);
+
+	# par un extrême hasard, le même donneur existe déjà dans la table
+	# For each of the acceptors, check if this one overlaps.
+	push(@{$reshash{$clef}}, join("@", ("$line[3]:$line[4]..$line[5]", $line[13], $line[11], $line[10], $line[7], $line[8], $line[9])));
+    }
+	
+    }
+    close(CURFILE);
+
+
+# print "\n-----ORIGINAL----";
+# my $newkey=(grep(/12753/, keys %reshash))[0];
+#     print "key $newkey contains:\n";
+#     for my $i (@{$reshash{$newkey}}){
+# 	print "\t$i\n";
+#     }
+
+    %reshash=purifyHash(%reshash);
+#    print "--PURIFIED----\n";
+
+# my $newkey=(grep(/12753/, keys %reshash))[0];
+#     print "key $newkey contains:\n";
+#     for my $i (@{$reshash{$newkey}}){
+# 	print "\t$i\n";
+#     }
+
+}
+#print "\nDone.\n.Hash contains ",scalar(values(%reshash)) ," values in ",scalar(keys(%reshash)) ,"keys.\n";
+
+
+# Print the shit.
+#printHash(%reshash);
+
+#Format the shit
+#debugHash(%reshash);
+printFormatted(%reshash);
+
+sub debugHash{
+    my (%reshash)=@_;
+    foreach my $key (keys %reshash){
+	print "$key\n";
+# 	foreach my $v (@{$reshash{$key}}){
+# 	    print "\t\t$v\n";
+# 	}
+    }
+
+}
+
+sub debugTable{
+    my ($t)=@_;
+    foreach my $line (@{$t}){
+	print join("\t", @{$line});
+	print "\n";
+    }
+
+}
+
+sub printHash{
+    my (%reshash)=@_;
+    my @list;
+    foreach my $key (keys %reshash){
+	my $dcoords=$key;
+	my $dchr=(split(":", $dcoords))[0];
+	my $tmp=(split(":", $dcoords))[1];
+	my $dstart=(split("-", $tmp))[0];
+	my $dstop=(split("-", $tmp))[1];
+	foreach my $val (@{$reshash{$key}}){
+	    my @tbl=split("@", $val);
+	    my $chr=(split(":", $tbl[0]))[0];
+	    $tmp=(split(":", $tbl[0]))[1];
+	    my $start=(split(/\.\./, $tmp))[0];
+	    my $end=(split(/\.\./, $tmp))[1];
+	    
+	    
+	    
+	    my @line=($chr, $start, $end, $end-$start, @tbl[4..6], $tbl[6]-$tbl[5], $tbl[3], $tbl[2], $tbl[1]);
+	    push(@list, \@line);
+#	print "$temp\n";
+	}
+#    print "\n";
+    }
+    
+    @list= sort{$a->[0] cmp $b->[0] || $a->[1] <=> $b->[1]} @list;
+
+    my $ident=0;
+    my $pchr="";
+    my $pstart=0;
+    my $pend=0;
+    for my $line (@list){
+	my @tbl=@{$line};
+	$ident++ if(!intersectLine($pchr, $pstart, $pend, $tbl[0], $tbl[1], $tbl[2]));
+	print join(",", $ident, @tbl), "\n";
+	$pchr=$tbl[0];
+	$pstart=$tbl[1];
+	$pend=$tbl[2];
+    }
+}
+
+sub printFormatted{
+    my (%reshash)=@_;
+    my @list;
+    foreach my $key (keys %reshash){
+#	my $dcur_ann=(split /\|/, $key)[0];
+	my $dcoords=$key;
+	my $dchr=(split(":", $dcoords))[0];
+	my $tmp=(split(":", $dcoords))[1];
+	my $dstart=(split("-", $tmp))[0];
+	my $dstop=(split("-", $tmp))[1];
+	foreach my $val (@{$reshash{$key}}){
+	    my @tbl=split("@", $val);
+	    my $chr=(split(":", $tbl[0]))[0];
+	    $tmp=(split(":", $tbl[0]))[1];
+	    my $start=(split(/\.\./, $tmp))[0];
+	    my $end=(split(/\.\./, $tmp))[1];
+	    
+	    
+	    
+	    my @line=($chr, $start, $end, $end-$start, @tbl[4..6], $tbl[3], $tbl[2], $tbl[6]-$tbl[5], $tbl[1]);
+	    push(@list, \@line);
+#	print "$temp\n";
+	}
+#    print "\n";
+    }
+    @list= sort{$a->[0] cmp $b->[0] || $a->[1] <=> $b->[1]} @list;
+    my $ident=0;
+    my @cur_i;
+    for my $line (@list){
+	my @tbl=@{$line};
+	if($#cur_i<0) {push(@cur_i, $line); next;} # initialisation
+
+	if(intersectTable($line, \@cur_i)){push @cur_i, $line}else{
+	    $ident++; 
+	    foreach my $l (@cur_i){
+		print ("\t");
+		print join("\t", $ident, "TRANS", @{$l}), "\n";
+	    }
+	    @cur_i=();
+	    push(@cur_i, $line);
+	}
+    }
+    foreach my $l (@cur_i){
+		print ("\t");
+		print join("\t", $ident, "TRANS", @{$l}), "\n";
+	    }
+}
+
+sub intersectTable{
+    my ($t1, $t2)=@_;
+    my @ta=@{$t1};
+    my @tb=@{$t2};
+#    return 1 if (scalar @tb == 0);
+    # ta contains a line, tb contains a table of lines
+    foreach my $line(@tb){
+	return 1 if (intersectLine($ta[0], $ta[1], $ta[2], $line->[0], $line->[1], $line->[2]));
+    }
+    return 0;
+    
+}
+
+sub intersectLine{
+    my ($chr1, $start1, $end1, $chr2, $start2, $end2)=@_;
+    my @intervals=sort {$a <=> $b} ($start1, $end1, $start2, $end2);
+    return 1 if($chr1 eq $chr2 && (($intervals[0]==$start1 && $intervals[1]==$start2) || ($intervals[0]==$start2 && $intervals[1]==$start1)) );
+    return 0;
+
+}
+
+
+# purifyHash
+# ==========
+# removes duplicate acceptors in a hash
+#
+sub purifyHash{
+    my (%reshash)=@_;
+#     print "BEFORE______________\n";
+#     debugHash(%reshash);
+    # check donors for overlap.
+    my %tmph;
+#     foreach my $key (keys %reshash){
+# 	    my $cur_ann=(split /\|/, $key)[0];
+# 	    my $coords=(split /\|/, $key)[1];
+# 	    my $chr=(split(/\:/, $coords))[0];
+# 	    my $tmp=(split(/\:/, $coords))[1];
+# 	    my $start=(split("-", $tmp))[0];
+# 	    my $stop=(split("-", $tmp))[0];
+
+# 	if(defined($pure_key{$key})){
+# 	    push(@{$pure_key{$key}}, @{$reshash{$key}});
+# 	    next;
+# 	}
+# 	foreach my $pure_key(keys %tmp){
+# 	    my $cur_ann=(split /\|/, $key)[0];
+# 	    my $coords=(split /\|/, $key)[1];
+# 	    my $chr=(split(":", $coords))[0];
+# 	    my $tmp=(split(":", $coords))[1];
+# 	    my $start=(split("-", $tmp))[0];
+# 	    my $stop=(split("-", $tmp))[0];
+
+# 	}
+#     }
+    # check acceptors for overlap.
+    foreach my $key (keys %reshash){
+	my @new_table;
+	my @old_table=@{$reshash{$key}};
+	# old_table contains existing acceptors for donor $key
+	foreach my $val (@old_table){
+#	    print "$val\n" if($val =~/1720/);
+	    my $chr=(split(/\:/, $val))[0];
+	    my $tmp=(split(/\:/, $val))[1];
+	    
+	    my $start=(split(/\.\./, $tmp))[0];
+	    $tmp=(split(/\.\./, $tmp))[1];
+	    my @temp=split("@", $tmp);
+	    my $end=$temp[0];
+	    my $read=$temp[1];
+	    my $score=$temp[$#temp];
+	    my $pos=(split("@", $val))[0];
+#	    print "($pos should be a position for key $key, $#new_table elements.)\n";
+	    # new_table, empty at the beginning, will contain merged acceptors
+	    if(scalar(grep(/$pos/, @new_table))<1){
+		my $found=0;
+		foreach my $uniq_val(@new_table){
+		    my $chrb=(split(/\:/, $uniq_val))[0];
+		    my $tmp=(split(/\:/, $uniq_val))[1];
+		    my $startb=(split(/\.\./, $tmp))[0];
+		    $tmp=(split(/\.\./, $tmp))[1];
+		    my @temp=split("@", $tmp);
+		    my $endb=$temp[0];
+		    my $readb=$temp[1];
+		    my $purescore=$temp[$#temp];
+		    my @intervals=sort {$a <=> $b} ($start, $end, $startb, $endb);
+		    if($chr eq $chrb && (($intervals[0]==$start && $intervals[1]==$startb) || ($intervals[0]==$startb && $intervals[1]==$start)) ){
+			$found=1;
+			if($read>$readb){
+#			    if() {
+#			    print "Before $#new_table elements, ";
+			    @new_table=grep {$_ ne $uniq_val} @new_table;
+#			    print "after $#new_table elements. (eliminating $uniq_val.\n";
+			    push(@new_table, $val);
+			    last;
+			}
+		    }else{
+			@intervals=sort {$a <=> $b} ($start, $end, $startb, $endb);
+		    if($chr eq $chrb && (($intervals[0]==($start) && $intervals[1]==($startb)) || ($intervals[0]==($startb) && $intervals[1]==($start))) ){
+			my $vrep=$chrb.":".min($start, $startb)."..".max($end, $endb)."@".($read+$readb)."@".(join("@",@temp[2..$#temp]));
+			@new_table=grep {$_ ne $uniq_val} @new_table;
+			push(@new_table, $vrep);
+		    }
+		    }
+		    
+		}
+		push(@new_table, $val) if ($found==0);
+	    }#else{print "$val was found in ", join("|||", @new_table), ", grep returned ",scalar(grep($val, @new_table)) ,"\n";}
+	
+	}
+	$tmph{$key}=\@new_table;
+    }
+#         print "AFTER______________\n";
+#     debugHash(%tmph);
+
+    return %tmph;
+}

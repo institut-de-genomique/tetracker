@@ -1,0 +1,39 @@
+#!/bin/bash
+
+read_size=76;
+genome_size=119667750;
+
+# find -maxdepth 1 -type f -iname rmdup.metrics | while read line; do
+# 	read_pairs_examined=$(grep "## METRICS CLASS" -A 2 $line | tail -n 1 | awk 'BEGIN{FS="\t";}{print $3}');
+# 	read_pairs_duplicates=$(grep "## METRICS CLASS" -A 2 $line | tail -n 1 | awk 'BEGIN{FS="\t";}{print $6}');
+# 	library_size=$(grep "## METRICS CLASS" -A 2 $line | tail -n 1 | awk 'BEGIN{FS="\t";}{print $9}');
+# 	libfactor=$(egrep -A 2 -e 'BIN' -e'VALUE' $line | tail -n 1 | awk '{sub(",", ".", $2);print $2}')
+# 	line_name=$(basename $(dirname $line))
+# 	total_fragments=$(lsRunProj -p AKL,$line_name -long -linkP | awk 'BEGIN{FS="\t";a=0}{a+=$12}END{print a}');
+# 	saturation=$(echo "scale=2; 100*($libfactor-1)*($read_pairs_examined-$read_pairs_duplicates)/$library_size" | bc);
+# 	duplication=$(echo "scale=2;100*$read_pairs_duplicates/$read_pairs_examined" | bc);
+# 	useable_pairs=$(($read_pairs_examined-$read_pairs_duplicates));
+# 	coverage=$(echo "scale=2;2*$read_size*$useable_pairs/$genome_size" | bc);
+# 	echo -e "$line_name,$saturation,$total_fragments,$duplication,$useable_pairs,$coverage";
+	
+# done
+
+
+find -maxdepth 1 -iname data.sorted.rmdup.bam | while read line; do
+#    line_name=$(basename($(dirname $(dirname $line))));
+    echo -e "Treating line $line_name...";
+    /env/cns/src/BEDTools/BEDTools-Version-2.16.2/bin/coverageBed -hist -abam $line -b Arabidopsis.bed | awk '$0~/^all/' | tr '\t' ',' > tmp.csv;
+    echo -e "h<-read.table(\"tmp.csv\", sep=\",\")" > tmp.r;
+    echo -e "sum(h[h[,2]<10,5])*100" >> tmp.r;
+    temp=$(R -q --vanilla < tmp.r);
+    percentile=$(echo $temp | perl -e '/\[.*\](.*)/{print $1}');
+
+    echo -e "h<-read.table(\"all.histo\", sep=\",\")" > tmp.r;
+    echo -e "sum(h[h[,2]<5,5])*100" >> tmp.r;
+    temp=$(R -q --vanilla < tmp.r);
+    percentile5=$(echo $temp | perl -e '/\[.*\](.*)/{print $1}');
+
+
+    echo -e "$percentile, $percentile5";
+
+done

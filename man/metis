@@ -1,0 +1,91 @@
+.\" Manpage for SVFINDER.
+.TH man 7 "04 sept. 2012" "1.0" "TE-Tracker - metis.pl"
+.SH NAME
+TE-Tracker Metis Module\- annotates TE-Tracker results and scores them
+.SH SYNOPSIS
+metis.pl
+.BI -in " indir"
+.BI -out " outdir"
+.I [OPTIONS]
+.SH DESCRIPTION
+.BR
+.TP 50
+"Now Zeus, king of the gods, made Metis his wife first, and she was wisest among gods and mortal men."
+Hesiod, Theogony
+
+.P
+The Metis module constitutes the last step in the TE-Tracker pipeline. As such, it is the default value of the 
+.B
+binary
+entry in the 
+.B 
+[POSTPROCESSING]
+section of the configuration file.
+ It is in charge of processing the temporary output file into a set of final ones, which incorporate various supplementary information, such as multiple donors, annotation and donor scoring. The program was named after Metis, wife of Zeus, goddess of wisdom.
+.P 
+This program should be located in the 
+.I
+basedir
+directory as specified in TE-Tracker.conf.
+.SH FEATURES
+.SS Donor scoring
+Metis can output a donor score in case there are multiple donor signatures for a single transposition event. The goal of this is to help discriminate between them. We have implemented a particular donor scoring algorithm, which is readily modifiable through the
+.BR "score_donors" " and"
+.B
+discriminate_donor
+functions in the script. The first one is called on the whole output file, the second one for each particular event.
+The scoring is based upon the following idea: alternative donor signals are set off by regions with similar sequences to the real donor. The mapper wrongly attributes reads to these similar regions and generate this transposition noise. However, donors are differentiated by minor sequence polymorphisms: following these SNP-containing reads should lead us to the real donor region, because they should not be able to map anywhere else.
+The candidate donor regions are screened for unique hit reads whose pair maps to the acceptor region. The score is the ratio between the quantity of these reads and their sum across all donors. We would await a ratio of 1 for the real donor, and 0 for the others. However experience has shown that BWA cannot be trusted to attribute unique hits correctly, therefore biasing the score. 
+.B
+It is vital to take this into account when interpreting the score number.
+.SS Annotation
+Metis is able to show donor and acceptor annotation, if it exists, from a user-supplied file. This works straightforwardly, as the program will simply intersect the annotated regions with TE-Tracker output. Please note that BEDTools is needed for this option to work.
+.SH EXAMPLE
+
+metis.pl -discordant discordant.sorted.bam -samtools=samtools -in . -out ./annotated_dir -reference=Arabidopsis_thaliana.fa -score_donors -annotate 
+.SH CONFIGURATION FILE
+Metis is the default binary in the 
+.B [POSTPROCESSING] 
+section of the TE-Tracker configuration file. The only specific variable in that section is
+.B bedtools_path
+which should be set to the BEDtools binary directory.
+
+
+
+.SH OPTIONS
+.SS Mandatory options
+.TP 20
+.BI -in " dirname"
+This is the input directory. Metis expects standard sv.* output files from 
+.BR leto.pl " there."
+.TP
+.BI -out " dirname"
+This is the output directory.
+.SS Discretionary options
+The following options are not compulsory for the program to run, however if you specify neither of them, the program will do nothing.
+.TP 20
+.BI "-annotate" 
+Tells the program to annotate donors and/or acceptors. Requires 
+.BI "-acc_annot"
+and/or
+.BI "-donor_annot"
+.TP
+.BI "-acc_annot " filename
+The program will look for acceptor annotation in file
+.IR "filename" .
+.TP
+.BI "-donor_annot " filename
+The program will look for donor annotation in file
+.IR "filename" .
+.TP
+.B -score_donors
+Tells the program to perform donor scoring according to unique matches. Requires the 
+.BR -discordant " option to be non-null."
+.TP 
+.BI -discordant " discordant_BAM"
+The path to a BAM discordant file, typically the output produced by 
+.BR eris.pl " with the "
+.B -discordant
+argument. Any BAM file will work, but the donor score will typically be wrong if the reads in it are not discordant. Use only with 
+.BR -score_donors " option."
+
