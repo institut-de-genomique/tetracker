@@ -82,7 +82,7 @@ die("ERROR: \"$!\" while making samtools. Do you have the required permissions?\
 ## BEDTOOLS
 print "INFO:\tGetting BEDtools...\n";
 `pwd`;
-$NULL=`wget http://bedtools.googlecode.com/files/BEDTools.v2.17.0.tar.gz -O  bedtools.tar.gz >/dev/null 2>&1`;
+$NULL=`wget https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com/bedtools/BEDTools.v2.17.0.tar.gz -O  bedtools.tar.gz >/dev/null 2>&1`;
 die("ERROR: \"$!\" while downloading BEDtools to the current directory.\n") if (($? >>8) !=0);
 print "INFO:\tUncompressing BEDtools...\n";
 $NULL=`tar --overwrite -xvzf bedtools.tar.gz`;
